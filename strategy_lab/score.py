@@ -11,13 +11,13 @@ import sys
 
 from . import sources
 from .db import connect
-from .replay import BASELINES, STARTING_BANKROLL, replay
+from .replay import ALL_STRATEGIES, STARTING_BANKROLL, replay
 
 BREAK_EVEN_HIT_RATE = 1 / 1.314422  # +0.314 on a win against -1.00 on a loss
 
 
 def render(conn, strategies=None) -> str:
-    strategies = list(strategies if strategies is not None else BASELINES)
+    strategies = list(strategies if strategies is not None else ALL_STRATEGIES)
     lines = []
     for symbol in sources.SYMBOLS:
         results = replay(conn, symbol=symbol, strategies=strategies)
@@ -25,6 +25,15 @@ def render(conn, strategies=None) -> str:
             "SELECT COUNT(*) FROM rounds WHERE symbol = ?", (symbol,)
         ).fetchone()[0]
         scoreable = max((len(r.trades) for r in results.values()), default=0)
+        rebuilt = conn.execute(
+            """
+            SELECT COUNT(*) FROM rounds
+             WHERE symbol = ? AND source = 'reconstructed'
+               AND winner IS NOT NULL AND COALESCE(partial, 0) = 0
+               AND COALESCE(oracle_stale, 0) = 0 AND COALESCE(unsettled, 0) = 0
+            """,
+            (symbol,),
+        ).fetchone()[0]
         lines.append(f"\n{symbol}  ({available} Rounds recorded, {scoreable} scoreable)")
         lines.append(f"  {'Strategy':<16}{'Hit Rate':>10}{'Trades':>9}{'Bankroll':>11}   Note")
         for strategy in strategies:
@@ -38,6 +47,13 @@ def render(conn, strategies=None) -> str:
             lines.append(
                 f"  {strategy.name:<16}{rate:>10}{len(result.trades):>9}"
                 f"{result.bankroll:>10.2f}   {note}"
+            )
+        if rebuilt and scoreable and rebuilt >= scoreable:
+            lines.append(
+                f"  ! every scored {symbol} Round was rebuilt from the price feed, which"
+                f" carries no\n    record of the pool. Each is therefore priced as though"
+                f" nobody had traded it —\n    an even 0.50 a Side. That flatters any"
+                f" Strategy that backs the favourite."
             )
     lines.append(
         f"\nStake {1.0:.2f} per Round from {STARTING_BANKROLL:.2f}. A win returns about "

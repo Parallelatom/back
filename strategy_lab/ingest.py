@@ -334,7 +334,8 @@ class Ingest:
         even though nobody was watching while it ran.
         """
         found = self.conn.execute(
-            "SELECT starting FROM rounds WHERE symbol = ? AND ending = ?", (symbol, ending)
+            "SELECT starting, strike FROM rounds WHERE symbol = ? AND ending = ?",
+            (symbol, ending),
         ).fetchone()
         if found is None:
             return
@@ -370,7 +371,40 @@ class Ingest:
                 ending,
             ),
         )
+        self._record_crossings(symbol, ending, found["strike"], list(zip(stamps, prices)))
         self.conn.commit()
+
+    def _record_crossings(self, symbol: str, ending: int, strike, observations) -> None:
+        """Write down every time the price changed sides, with its size and how long it held.
+
+        Derivable from the series, and recorded anyway: trying a different rule for Flip
+        Follow later should be a query, not another week of collection.
+        """
+        self.conn.execute(
+            "DELETE FROM delta_flips WHERE symbol = ? AND round_ending = ?", (symbol, ending)
+        )
+        if not strike:
+            return
+        previous = None
+        crossings = []
+        for ts, price in observations:
+            delta = (price - strike) / strike * 100.0
+            # A Round asks whether the price ends up *above* the Strike, so level is DOWN.
+            side = "UP" if delta > 0 else "DOWN"
+            if previous is not None and side != previous:
+                crossings.append([ts, side, delta, 0])
+            if crossings and crossings[-1][1] == side:
+                crossings[-1][3] = ts - crossings[-1][0]
+            previous = side
+        for ts, side, delta, held in crossings:
+            self.conn.execute(
+                """
+                INSERT INTO delta_flips (symbol, round_ending, ts, to_side, delta_pct,
+                                         held_seconds, code_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (symbol, ending, ts, side, delta, held, self.code_version),
+            )
 
     def finalise_closed_rounds(self, now: int) -> int:
         """Summarise every Round that has closed and not yet been summarised."""

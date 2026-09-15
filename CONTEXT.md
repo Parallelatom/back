@@ -128,6 +128,8 @@ Enters `DOWN` on every Round with no condition. A baseline, not a belief.
 Strategy 4.3 in the original brief.
 
 **Flip Follow**:
-Enters when Delta changes sign during the Trade Window and stays on the new side for three
-seconds, taking the Side that Delta flipped to. The hold is what separates a real crossing
-from the noise of a price sitting on its Strike. Strategy 4.4 in the original brief.
+Enters when Delta changes sign during the Trade Window and both sides of the crossing hold
+for three seconds, taking the Side that Delta flipped to. Requiring the old side to have
+held too is what separates a real crossing from a price resting on its Strike and
+flickering across it — a flicker produces a crossing and a recrossing, and checking only
+the new side would simply trigger on the second one. Strategy 4.4 in the original brief.

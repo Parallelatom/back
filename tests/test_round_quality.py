@@ -191,3 +191,55 @@ class TestFinalisingWhatHasClosed:
         assert ingest.finalise_closed_rounds(now=T0 + GRID + 1) == 1
 
         assert ingest.finalise_closed_rounds(now=T0 + GRID + 1) == 0
+
+
+class TestRecordingCrossings:
+    """Every crossing of the Strike is written down with its size and how long it held, so
+    a different rule for Flip Follow can be tried later against the same recordings."""
+
+    def flips(self, ingest):
+        return [dict(r) for r in ingest.conn.execute(
+            "SELECT * FROM delta_flips ORDER BY ts")]
+
+    def test_a_crossing_is_recorded(self, ingest):
+        a_round(ingest, strike=100.0)
+        series(ingest, T0, T0 + 400, lambda ts: 99.0, step=5)
+        series(ingest, T0 + 405, T0 + GRID, lambda ts: 101.0, step=5)
+        ingest.finalise_round(BTC, T0 + GRID)
+
+        (flip,) = self.flips(ingest)
+        assert flip["to_side"] == "UP"
+        assert flip["ts"] == T0 + 405
+
+    def test_the_size_of_the_move_is_recorded(self, ingest):
+        a_round(ingest, strike=100.0)
+        series(ingest, T0, T0 + 400, lambda ts: 99.0, step=5)
+        series(ingest, T0 + 405, T0 + GRID, lambda ts: 100.5, step=5)
+        ingest.finalise_round(BTC, T0 + GRID)
+
+        assert self.flips(ingest)[0]["delta_pct"] == pytest.approx(0.5)
+
+    def test_how_long_the_new_side_held_is_recorded(self, ingest):
+        a_round(ingest, strike=100.0)
+        series(ingest, T0, T0 + 400, lambda ts: 99.0, step=5)
+        series(ingest, T0 + 405, T0 + 500, lambda ts: 101.0, step=5)
+        series(ingest, T0 + 505, T0 + GRID, lambda ts: 99.0, step=5)
+        ingest.finalise_round(BTC, T0 + GRID)
+
+        assert self.flips(ingest)[0]["held_seconds"] == 95
+
+    def test_a_round_that_never_crosses_records_nothing(self, ingest):
+        a_round(ingest, strike=100.0)
+        series(ingest, T0, T0 + GRID, lambda ts: 101.0)
+        ingest.finalise_round(BTC, T0 + GRID)
+
+        assert self.flips(ingest) == []
+
+    def test_finalising_twice_does_not_duplicate_the_crossings(self, ingest):
+        a_round(ingest, strike=100.0)
+        series(ingest, T0, T0 + 400, lambda ts: 99.0, step=5)
+        series(ingest, T0 + 405, T0 + GRID, lambda ts: 101.0, step=5)
+        ingest.finalise_round(BTC, T0 + GRID)
+        ingest.finalise_round(BTC, T0 + GRID)
+
+        assert len(self.flips(ingest)) == 1

@@ -22,6 +22,17 @@ from .amm import SCALE, Reserves, fill, marginal_price
 WINDOW_OPENS = 300
 WINDOW_CLOSES = 60
 
+# How far the price must sit from the Strike, as a percentage of it, before Delta Edge will
+# act. Per Symbol because BTC and crude are not the same instrument, even if they start at
+# the same number for want of evidence to choose a better one.
+DELTA_THRESHOLD_PCT = {"BTC": 0.1, "XYZCL": 0.1}
+DEFAULT_DELTA_THRESHOLD_PCT = 0.1
+
+# How long a crossing of the Strike must hold before Flip Follow believes it. A price
+# resting on its Strike flickers across it constantly; this is what separates a crossing
+# from that flicker.
+FLIP_HOLD_SECONDS = 3
+
 STAKE = 1.0
 STAKE_MICRO = int(STAKE * SCALE)
 STARTING_BANKROLL = 10.0
@@ -108,9 +119,121 @@ def _enter_at_window_open(side: str) -> Callable[[RoundRecord], Optional[Entry]]
     return decide
 
 
+def _window(record: RoundRecord) -> Tuple[int, int]:
+    return record.ending - WINDOW_OPENS, record.ending - WINDOW_CLOSES
+
+
+def _side_of(delta: float) -> str:
+    """A Round asks whether the price ends up *above* the Strike, so level is not above."""
+    return "UP" if delta > 0 else "DOWN"
+
+
+def delta_edge(thresholds: Optional[Dict[str, float]] = None) -> Strategy:
+    """Act the moment the price is far enough from the Strike, in the direction it leans."""
+    thresholds = DELTA_THRESHOLD_PCT if thresholds is None else thresholds
+
+    def decide(record: RoundRecord) -> Optional[Entry]:
+        threshold = thresholds.get(record.symbol, DEFAULT_DELTA_THRESHOLD_PCT)
+        opens, closes = _window(record)
+        for ts, _ in record.prices:
+            if ts < opens:
+                continue
+            if ts > closes:
+                return None
+            delta = record.delta_pct(ts)
+            if delta is not None and abs(delta) > threshold:
+                return Entry(at=ts, side=_side_of(delta))
+        return None
+
+    return Strategy(name="Delta Edge", decide=decide)
+
+
+def flip_follow(hold_seconds: int = FLIP_HOLD_SECONDS) -> Strategy:
+    """Act when the price crosses its Strike and stays across.
+
+    Deliberately carries no size requirement of its own: a crossing counts however slight.
+    That makes it differ from Delta Edge in two respects rather than one, which is why the
+    Collector also records each crossing's size, so the other variant can be tried later
+    against the same recordings.
+    """
+
+    def decide(record: RoundRecord) -> Optional[Entry]:
+        opens, closes = _window(record)
+        for flip in _crossings(record):
+            confirmed_at = flip.at + hold_seconds
+            if confirmed_at < opens:
+                continue
+            if confirmed_at > closes:
+                return None
+            if _sustained(record, flip, hold_seconds):
+                return Entry(at=confirmed_at, side=flip.side)
+        return None
+
+    return Strategy(name="Flip Follow", decide=decide)
+
+
+@dataclass(frozen=True)
+class Crossing:
+    """A moment the price moved from one side of its Strike to the other."""
+
+    at: int
+    side: str
+    delta_pct: float
+
+
+def _crossings(record: RoundRecord) -> List[Crossing]:
+    found: List[Crossing] = []
+    previous: Optional[str] = None
+    for ts, _ in record.prices:
+        delta = record.delta_pct(ts)
+        if delta is None:
+            continue
+        side = _side_of(delta)
+        if previous is not None and side != previous:
+            found.append(Crossing(at=ts, side=side, delta_pct=delta))
+        previous = side
+    return found
+
+
+def _sustained(record: RoundRecord, flip: Crossing, hold_seconds: int) -> bool:
+    """Whether a crossing is real, meaning both sides of it held.
+
+    Checking only the new side is not enough. A price flickering across its Strike produces
+    a crossing *and* a recrossing, and the recrossing back to where it already was would
+    otherwise qualify — so the flicker would trigger after all, just in the other direction.
+
+    Expressed in elapsed time rather than in observations, because the feed publishes every
+    few seconds and has been seen to stretch to fifteen. A rule that wanted an observation
+    at every second would simply never fire on real data.
+    """
+    other = "UP" if flip.side == "DOWN" else "DOWN"
+    if record.prices and record.prices[0][0] > flip.at - hold_seconds:
+        return False  # the Round did not start early enough to show the old side holding
+    if not _side_in_force(record, flip.at - hold_seconds) == other:
+        return False
+    if not _side_in_force(record, flip.at + hold_seconds) == flip.side:
+        return False
+    for ts, _ in record.prices:
+        if ts < flip.at - hold_seconds or ts > flip.at + hold_seconds:
+            continue
+        expected = other if ts < flip.at else flip.side
+        if _side_in_force(record, ts) != expected:
+            return False
+    return True
+
+
+def _side_in_force(record: RoundRecord, moment: int) -> Optional[str]:
+    delta = record.delta_pct(moment)
+    return None if delta is None else _side_of(delta)
+
+
 ALWAYS_UP = Strategy(name="Always Up", decide=_enter_at_window_open("UP"))
 ALWAYS_DOWN = Strategy(name="Always Down", decide=_enter_at_window_open("DOWN"))
+DELTA_EDGE = delta_edge()
+FLIP_FOLLOW = flip_follow()
+
 BASELINES = [ALWAYS_UP, ALWAYS_DOWN]
+ALL_STRATEGIES = [DELTA_EDGE, ALWAYS_UP, ALWAYS_DOWN, FLIP_FOLLOW]
 
 
 def load_rounds(conn: sqlite3.Connection, symbol: str) -> List[RoundRecord]:
