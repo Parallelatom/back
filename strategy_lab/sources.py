@@ -37,6 +37,17 @@ query ($symbol: String!, $category: String!) {
 """
 
 
+_PAST_ROUNDS_QUERY = """
+query ($category: [String!]) {
+  campaigns(category: $category, pageSize: 500) {
+    starting
+    ending
+    priceMetadata { baseAsset priceTargetForUp }
+  }
+}
+"""
+
+
 def subscription(symbol: str) -> Dict[str, Any]:
     field = [{"name": "base", "filter_constraints": {"et": symbol}}]
     table = [{"table": PRICES_TABLE, "fields": field}]
@@ -75,6 +86,30 @@ class Graph:
         if not data:
             return None
         return parse_round(symbol, data.get("campaignBySymbol"))
+
+
+    def past_rounds(self):
+        """Every Round the API still remembers, which is roughly the last 2.5 hours.
+
+        Only useful as a check on reconstruction: it is far too shallow to test a Strategy
+        against, which is the whole reason the harness records forward (ADR-0002).
+        """
+        data = self.query(_PAST_ROUNDS_QUERY, {"category": [CATEGORY]})
+        if not data:
+            return []
+        found = []
+        for campaign in data.get("campaigns") or ():
+            metadata = (campaign or {}).get("priceMetadata") or {}
+            symbol = metadata.get("baseAsset")
+            strike = metadata.get("priceTargetForUp")
+            ending = campaign.get("ending")
+            if not (symbol and strike and ending):
+                continue
+            try:
+                found.append((symbol, int(ending), float(strike)))
+            except (TypeError, ValueError):
+                continue
+        return found
 
 
 def parse_round(symbol: str, campaign: Any) -> Optional[RoundMeta]:

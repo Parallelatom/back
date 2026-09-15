@@ -25,6 +25,10 @@ log = logging.getLogger("collector")
 
 DB_PATH = os.environ.get("STRATEGY_LAB_DB", "data/lab.db")
 POLL_SECONDS = float(os.environ.get("STRATEGY_LAB_POLL_SECONDS", "3"))
+# Long enough for the opening snapshot to have landed, since that is what there is to
+# rebuild from; then repeated, because it also fills Rounds the live poller missed.
+BACKFILL_DELAY_SECONDS = 30
+BACKFILL_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_BACKFILL_SECONDS", "900"))
 WS_PING_INTERVAL = 15
 WS_PING_TIMEOUT = 10
 RETRY_MIN = 1
@@ -51,6 +55,28 @@ async def poll_rounds(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> None
             if meta is not None:
                 ingest.observe_round(meta, now=int(time.time()))
             await _sleep(stop, sources.jittered(POLL_SECONDS))
+
+
+async def backfill_rounds(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> None:
+    """Rebuild past Rounds from the price series, then correct them against the exchange.
+
+    The feed replays several hours of prices on every connection, which is deeper than the
+    exchange's own retention, so this is the only way the experiment starts with history
+    rather than waiting days for it.
+    """
+    await _sleep(stop, BACKFILL_DELAY_SECONDS)
+    while not stop.is_set():
+        try:
+            rebuilt = sum(ingest.reconstruct_rounds(symbol) for symbol in sources.SYMBOLS)
+            authoritative = await asyncio.get_event_loop().run_in_executor(
+                None, graph.past_rounds
+            )
+            corrected = ingest.apply_authoritative_strikes(authoritative)
+            if rebuilt or corrected:
+                log.info("backfill: rebuilt %d Rounds, corrected %d", rebuilt, corrected)
+        except Exception:  # backfill must never end collection
+            log.exception("backfill failed")
+        await _sleep(stop, BACKFILL_EVERY_SECONDS)
 
 
 async def stream_prices(ingest: Ingest, stop: asyncio.Event) -> None:
@@ -128,9 +154,11 @@ async def run(db_path: str = DB_PATH, duration: Optional[float] = None) -> None:
         except (NotImplementedError, RuntimeError):
             pass
 
+    graph = Graph()
     tasks = [
         asyncio.ensure_future(stream_prices(ingest, stop)),
-        asyncio.ensure_future(poll_rounds(ingest, Graph(), stop)),
+        asyncio.ensure_future(poll_rounds(ingest, graph, stop)),
+        asyncio.ensure_future(backfill_rounds(ingest, graph, stop)),
     ]
     if duration is not None:
         tasks.append(asyncio.ensure_future(_stop_after(stop, duration)))

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS rounds (
     outcome_down         TEXT,
     first_seen_at        INTEGER NOT NULL,
     last_seen_at         INTEGER NOT NULL,
+    source               TEXT    NOT NULL DEFAULT 'live',
     partial              INTEGER NOT NULL DEFAULT 0,
     oracle_stale         INTEGER,
     winner               TEXT,
@@ -39,14 +40,17 @@ CREATE TABLE IF NOT EXISTS rounds (
     PRIMARY KEY (symbol, ending)
 );
 
-CREATE TABLE IF NOT EXISTS ticks (
+-- The complete oracle series, kept whole. Which Round a price falls inside is a question
+-- answered at read time by joining to `rounds`, never a reason to discard the price: the
+-- feed replays hours of history on every connection and that history is what makes past
+-- Rounds reconstructable.
+CREATE TABLE IF NOT EXISTS oracle_prices (
     symbol       TEXT    NOT NULL,
     ts           INTEGER NOT NULL,
     price        REAL    NOT NULL,
-    round_ending INTEGER NOT NULL,
-    code_version TEXT    NOT NULL
+    code_version TEXT    NOT NULL,
+    PRIMARY KEY (symbol, ts)
 );
-CREATE INDEX IF NOT EXISTS ticks_by_round ON ticks (symbol, round_ending, ts);
 
 CREATE TABLE IF NOT EXISTS reserves (
     pool_address TEXT    NOT NULL,

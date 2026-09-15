@@ -102,6 +102,12 @@ is the primary measure of whether a Strategy works, because the markets are too 
 money figure to survive contact with real execution.
 _Avoid_: win rate, accuracy, winrate, success rate
 
+**Reconstructed Round**:
+A past Round rebuilt from the oracle price series rather than watched as it happened. It
+carries a Strike, a close and a winning Side, but no Reserves, so it is priced at the even
+opening Reserves. Only BTC has the backlog to rebuild from.
+_Avoid_: backfilled, historical, synthetic, derived round
+
 **Partial Round**:
 A Round the Collector only saw part of, because it started or restarted while the Round was
 already open. Everything seen is still recorded, but no Strategy takes a Paper Trade on it.
