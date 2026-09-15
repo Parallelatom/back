@@ -30,6 +30,18 @@ the Collector is down is a stretch that can never be recovered for oil, and beyo
 hours it cannot be recovered for BTC either. That is why the Collector restarts unless
 explicitly stopped, and why deploying sooner beats deploying tidily.
 
+## The dashboard
+
+`./deploy.sh` starts it alongside the Collector, bound to `127.0.0.1:8000` on the host. To
+look at it from your laptop before the tunnel exists:
+
+```sh
+ssh -L 8000:localhost:8000 user@your-vps
+```
+
+then open <http://localhost:8000>. It mounts the database read-only, so it cannot disturb
+collection whatever it does.
+
 ## Reading the results
 
 ```sh

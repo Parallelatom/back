@@ -13,8 +13,29 @@ services:
     environment:
       STRATEGY_LAB_DB: /data/lab.db
       STRATEGY_LAB_LOG: INFO
-    logging:
+    logging: &logging
       driver: json-file
       options:
         max-size: "10m"
         max-file: "5"
+
+  dashboard:
+    build:
+      context: .
+      args:
+        STRATEGY_LAB_VERSION: ${STRATEGY_LAB_VERSION:-unknown}
+    command: ["python", "-m", "strategy_lab.dashboard"]
+    restart: unless-stopped
+    depends_on:
+      - collector
+    volumes:
+      # Read-only: the dashboard must never be able to disturb the recordings.
+      - ./data:/data:ro
+    ports:
+      # Bound to the loopback interface. Reaching it from outside is the tunnel's job, so
+      # that authentication lives in Cloudflare Access rather than in this code.
+      - "127.0.0.1:8000:8000"
+    environment:
+      STRATEGY_LAB_DB: /data/lab.db
+      STRATEGY_LAB_LOG: INFO
+    logging: *logging
