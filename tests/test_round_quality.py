@@ -243,3 +243,38 @@ class TestRecordingCrossings:
         ingest.finalise_round(BTC, T0 + GRID)
 
         assert len(self.flips(ingest)) == 1
+
+
+class TestRepairingRoundsJudgedWithoutEvidence:
+    """A Round summarised while its prices were missing was judged on nothing.
+
+    When the feed later supplies that stretch — the snapshot reaches back hours — the
+    judgement has to be made again, or a fault that has since been fixed goes on costing
+    Rounds that are now perfectly good.
+    """
+
+    def test_a_round_summarised_with_no_prices_is_judged_again_once_they_arrive(self, ingest):
+        a_round(ingest)
+        ingest.finalise_closed_rounds(now=T0 + GRID + 1)
+        assert row(ingest)["partial"] == 1
+        assert row(ingest)["tick_count"] == 0
+
+        series(ingest, T0, T0 + GRID, lambda ts: 100.0 + (ts - T0) * 0.01)
+        ingest.finalise_closed_rounds(now=T0 + GRID + 1)
+
+        assert row(ingest)["partial"] == 0
+        assert row(ingest)["tick_count"] > 100
+
+    def test_a_round_that_genuinely_has_no_prices_stays_partial(self, ingest):
+        a_round(ingest)
+        ingest.finalise_closed_rounds(now=T0 + GRID + 1)
+        ingest.finalise_closed_rounds(now=T0 + GRID + 1)
+
+        assert row(ingest)["partial"] == 1
+
+    def test_a_round_already_summarised_with_prices_is_left_alone(self, ingest):
+        a_round(ingest)
+        series(ingest, T0, T0 + GRID, lambda ts: 100.0)
+        assert ingest.finalise_closed_rounds(now=T0 + GRID + 1) == 1
+
+        assert ingest.finalise_closed_rounds(now=T0 + GRID + 1) == 0

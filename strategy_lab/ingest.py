@@ -431,11 +431,17 @@ class Ingest:
         return bool(agrees)
 
     def finalise_closed_rounds(self, now: int) -> int:
-        """Summarise every Round that has closed and not yet been summarised."""
+        """Summarise every closed Round that has not been summarised on any evidence.
+
+        A Round summarised while no prices had arrived for it was judged on nothing, and is
+        revisited: the feed's snapshot reaches back hours, so a fault that has since been
+        fixed would otherwise go on costing Rounds that are now perfectly good.
+        """
         pending = self.conn.execute(
             """
             SELECT symbol, ending FROM rounds
-             WHERE ending <= ? AND distinct_price_count IS NULL
+             WHERE ending <= ?
+               AND (distinct_price_count IS NULL OR tick_count = 0)
              ORDER BY ending
             """,
             (now,),

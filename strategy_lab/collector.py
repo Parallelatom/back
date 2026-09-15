@@ -32,6 +32,9 @@ BACKFILL_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_BACKFILL_SECONDS", "
 RECONCILE_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_RECONCILE_SECONDS", "30"))
 VERIFY_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_VERIFY_SECONDS", "86400"))
 VERIFY_DELAY_SECONDS = 120
+SILENCE_CHECK_SECONDS = 300
+# The feed publishes about every five seconds; five minutes of nothing is a fault.
+SILENCE_ALARM_SECONDS = 300
 WS_PING_INTERVAL = 15
 WS_PING_TIMEOUT = 10
 RETRY_MIN = 1
@@ -180,8 +183,15 @@ async def backfill_rounds(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> 
         await _sleep(stop, BACKFILL_EVERY_SECONDS)
 
 
-async def stream_prices(ingest: Ingest, stop: asyncio.Event) -> None:
-    """Follow the price feed, reconnecting for as long as the process lives."""
+async def stream_feed(subscription, ingest: Ingest, stop: asyncio.Event) -> None:
+    """Follow one subscription on its own connection, reconnecting for as long as we live.
+
+    One connection per subscription is not tidiness. The server lets a later subscription
+    to the same table replace an earlier one, so sharing a socket between two Symbols
+    silently delivers only the second — with no error, no disconnect, and a snapshot from
+    the first to make it look as though it had worked.
+    """
+    label = subscription.get("label", "feed")
     backoff = RETRY_MIN
     while not stop.is_set():
         try:
@@ -192,11 +202,8 @@ async def stream_prices(ingest: Ingest, stop: asyncio.Event) -> None:
                 ping_timeout=WS_PING_TIMEOUT,
                 max_size=None,
             ) as socket:
-                for symbol in sources.SYMBOLS:
-                    await socket.send(_dumps(sources.subscription(symbol)))
-                for table_name in sources.POOL_TABLES:
-                    await socket.send(_dumps(sources.pool_subscription(table_name)))
-                log.info("price feed connected")
+                await socket.send(_dumps(subscription))
+                log.info("feed connected: %s", label)
                 backoff = RETRY_MIN
                 async for raw in socket:
                     message = sources.decode(raw)
@@ -207,10 +214,36 @@ async def stream_prices(ingest: Ingest, stop: asyncio.Event) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.warning("price feed dropped (%s); retrying in %ss", exc, backoff)
-            _note_gap(ingest, f"price feed dropped: {exc}")
+            log.warning("feed %s dropped (%s); retrying in %ss", label, exc, backoff)
+            _note_gap(ingest, f"feed {label} dropped: {exc}")
             await _sleep(stop, backoff)
             backoff = min(backoff * 2, RETRY_MAX)
+
+
+async def watch_for_silence(ingest: Ingest, stop: asyncio.Event) -> None:
+    """Complain when a Symbol stops sending prices.
+
+    The feed can go quiet for one Symbol while the connection stays healthy and the others
+    keep arriving, which is exactly how a whole day of BTC was lost once. Nothing about
+    that failure announced itself, so this is what announces it.
+    """
+    while not stop.is_set():
+        await _sleep(stop, SILENCE_CHECK_SECONDS)
+        if stop.is_set():
+            return
+        now = int(time.time())
+        for symbol in sources.SYMBOLS:
+            latest = ingest.conn.execute(
+                "SELECT MAX(ts) FROM oracle_prices WHERE symbol = ?", (symbol,)
+            ).fetchone()[0]
+            if latest is None:
+                log.error("no prices at all for %s yet", symbol)
+            elif now - latest > SILENCE_ALARM_SECONDS:
+                log.error(
+                    "%s has sent no price for %d seconds; its Rounds will be unscoreable",
+                    symbol, now - latest,
+                )
+                _note_gap(ingest, f"{symbol} silent for {now - latest}s")
 
 
 def _dumps(payload) -> str:
@@ -259,8 +292,12 @@ async def run(db_path: str = DB_PATH, duration: Optional[float] = None) -> None:
 
     graph = Graph()
     tasks = [
-        asyncio.ensure_future(stream_prices(ingest, stop)),
+        asyncio.ensure_future(stream_feed(subscription, ingest, stop))
+        for subscription in sources.all_subscriptions()
+    ]
+    tasks += [
         asyncio.ensure_future(poll_rounds(ingest, graph, stop)),
+        asyncio.ensure_future(watch_for_silence(ingest, stop)),
         asyncio.ensure_future(backfill_rounds(ingest, graph, stop)),
         asyncio.ensure_future(reconcile_reserves(ingest, graph, stop)),
         asyncio.ensure_future(close_out_rounds(ingest, stop)),

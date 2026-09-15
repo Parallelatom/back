@@ -71,6 +71,19 @@ def pool_subscription(table_name: str) -> Dict[str, Any]:
     return {"label": table_name, "ask_for_snapshot": table, "add": table}
 
 
+def all_subscriptions():
+    """Every subscription the Collector needs, each to be carried on its own connection.
+
+    A second subscription to the same table on one connection replaces the first: sending
+    BTC and then XYZCL over a single socket delivers XYZCL's snapshot and then only XYZCL's
+    updates, in silence. The original bot opened a connection per symbol and so never met
+    this. One connection per subscription is what is known to work.
+    """
+    return [subscription(symbol) for symbol in SYMBOLS] + [
+        pool_subscription(table_name) for table_name in POOL_TABLES
+    ]
+
+
 class Graph:
     """Reads Round metadata. Deliberately slow: the endpoint does no edge caching and
     answers in about 1.2 seconds, so polling harder buys nothing and risks the one thing
