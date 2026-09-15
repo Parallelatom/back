@@ -88,6 +88,24 @@ Hit Rate is the finding. The Bankroll column is indicative only: a 1 USD ticket 
 typical Round's volume, so no real order of that size would fill at the prices it assumes.
 Break-even sits at a 76.1% Hit Rate, because a win returns about +0.31 against a loss of 1.00.
 
+## Backing up
+
+The recordings cannot be rebuilt. The exchange remembers about two and a half hours and the
+price feed a few more, so a disk lost on Thursday cannot be re-collected on Friday, however
+quickly it is noticed. Everything else here comes back from git in a minute.
+
+```sh
+./backup.sh
+```
+
+Writes a consistent copy to `~/lab-backups` and keeps the last fourteen. Run it from cron:
+
+```sh
+(crontab -l 2>/dev/null; echo "0 * * * * cd $PWD && ./backup.sh >> /tmp/lab-backup.log 2>&1") | crontab -
+```
+
+Copy one off the host now and then — a backup on the same disk as the original is not one.
+
 ## Development
 
 ```sh
