@@ -236,22 +236,28 @@ BASELINES = [ALWAYS_UP, ALWAYS_DOWN]
 ALL_STRATEGIES = [DELTA_EDGE, ALWAYS_UP, ALWAYS_DOWN, FLIP_FOLLOW]
 
 
-def load_rounds(conn: sqlite3.Connection, symbol: str) -> List[RoundRecord]:
+def load_rounds(
+    conn: sqlite3.Connection,
+    symbol: str,
+    include_stale: bool = False,
+    include_partial: bool = False,
+) -> List[RoundRecord]:
     """Every Round fit to be scored, oldest first.
 
-    A Round is skipped when we cannot say what happened in it: one we only saw part of, one
-    whose oracle never moved, or one that never resolved. Each of those would otherwise
-    contribute a result that looks like evidence and is not.
+    A Round we only saw part of, or whose oracle never moved, is left out by default and
+    can be asked for: both are judgements about quality, and a judgement should be
+    reversible. A Round that never resolved is left out regardless — no setting can conjure
+    a result we never learned.
     """
     rows = conn.execute(
-        """
+        f"""
         SELECT symbol, starting, ending, strike, winner FROM rounds
          WHERE symbol = ?
            AND winner IS NOT NULL
            AND strike IS NOT NULL
-           AND COALESCE(partial, 0) = 0
-           AND COALESCE(oracle_stale, 0) = 0
            AND COALESCE(unsettled, 0) = 0
+           {"" if include_partial else "AND COALESCE(partial, 0) = 0"}
+           {"" if include_stale else "AND COALESCE(oracle_stale, 0) = 0"}
          ORDER BY ending
         """,
         (symbol,),
@@ -295,10 +301,13 @@ def replay(
     conn: sqlite3.Connection,
     symbol: str,
     strategies: Optional[Sequence[Strategy]] = None,
+    include_stale: bool = False,
+    include_partial: bool = False,
 ) -> Dict[str, Result]:
     """Score each Strategy over the recorded Rounds for one Symbol."""
     strategies = list(strategies if strategies is not None else BASELINES)
-    records = load_rounds(conn, symbol)
+    records = load_rounds(conn, symbol, include_stale=include_stale,
+                          include_partial=include_partial)
     results = {s.name: Result(strategy=s.name, symbol=symbol) for s in strategies}
 
     for record in records:

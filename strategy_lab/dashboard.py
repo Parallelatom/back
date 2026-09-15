@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 from .db import connect
 from .render import render_page
@@ -25,15 +26,20 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "StrategyLab"
 
     def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
-        path = self.path.split("?", 1)[0]
-        if path in ("/healthz", "/health"):
+        parsed = urlsplit(self.path)
+        if parsed.path in ("/healthz", "/health"):
             return self._send(200, "text/plain; charset=utf-8", b"ok")
-        if path != "/":
+        if parsed.path != "/":
             return self._send(404, "text/plain; charset=utf-8", b"not found")
+        query = parse_qs(parsed.query)
         try:
             conn = connect(DB_PATH)
             try:
-                body = render_page(conn).encode("utf-8")
+                body = render_page(
+                    conn,
+                    include_stale="stale" in query,
+                    include_partial="partial" in query,
+                ).encode("utf-8")
             finally:
                 conn.close()
         except Exception:

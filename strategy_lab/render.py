@@ -23,6 +23,9 @@ GAP_SECONDS = 2 * 900
 
 BREAK_EVEN_HIT_RATE = 1 / 1.314422
 
+# Enough to check the scoring by eye without turning the page into a data dump.
+RECENT_ROUNDS = 50
+
 COLOURS = {
     "Delta Edge": "#2563eb",
     "Always Up": "#16a34a",
@@ -33,6 +36,17 @@ COLOURS = {
 CHART_WIDTH = 520
 CHART_HEIGHT = 260
 PADDING = 44
+
+
+def format_number(value: Optional[float]) -> str:
+    """A price as written, without inventing or losing digits.
+
+    Not %g: at six significant figures that quietly rounds a BTC price, and a Strike that
+    is off by a unit changes which Side won.
+    """
+    if value is None:
+        return "—"
+    return f"{value:.6f}".rstrip("0").rstrip(".") or "0"
 
 
 def format_time(moment: int) -> str:
@@ -144,10 +158,90 @@ def _table(symbol: str, results, rebuilt: int, scoreable: int) -> str:
     )
 
 
-def render_page(conn: sqlite3.Connection) -> str:
+def _recent_rounds(conn, entries, include_stale: bool, include_partial: bool) -> str:
+    """The last few Rounds, one per line, so the scoring can be checked rather than trusted.
+
+    Charts hide arithmetic mistakes well. A Round showing its Strike, its close, who won and
+    who entered does not.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT symbol, ending, strike, final_price, winner, source, oracle_stale, partial
+          FROM rounds
+         WHERE winner IS NOT NULL
+           AND COALESCE(unsettled, 0) = 0
+           {"" if include_partial else "AND COALESCE(partial, 0) = 0"}
+           {"" if include_stale else "AND COALESCE(oracle_stale, 0) = 0"}
+         ORDER BY ending DESC LIMIT ?
+        """,
+        (RECENT_ROUNDS,),
+    ).fetchall()
+    if not rows:
+        return '<p class="meta">No settled Rounds recorded yet.</p>'
+
+    lines = []
+    for row in rows:
+        took = entries.get((row["symbol"], row["ending"]), [])
+        entered = " ".join(
+            f'<span class="tag" style="border-color:{COLOURS[name]}">'
+            f"{html.escape(name)} {side}</span>"
+            for name, side in took
+        ) or '<span class="meta">none</span>'
+        flags = []
+        if row["source"] == "reconstructed":
+            flags.append("rebuilt")
+        if row["oracle_stale"]:
+            flags.append("stale")
+        if row["partial"]:
+            flags.append("partial")
+        close = format_number(row["final_price"])
+        lines.append(
+            f"<tr><td>{html.escape(format_time(row['ending']))}</td>"
+            f"<td>{html.escape(row['symbol'])}</td>"
+            f'<td class="num">{format_number(row["strike"])}</td>'
+            f'<td class="num">{close}</td>'
+            f"<td>{html.escape(row['winner'])}</td>"
+            f"<td>{entered}</td>"
+            f'<td class="meta">{" ".join(flags)}</td></tr>'
+        )
+    return (
+        '<table class="rounds"><thead><tr><th>Settled</th><th>Symbol</th>'
+        "<th class='num'>Strike</th><th class='num'>Close</th><th>Won</th>"
+        "<th>Entered</th><th></th></tr></thead>"
+        f"<tbody>{''.join(lines)}</tbody></table>"
+    )
+
+
+def _toggles(include_stale: bool, include_partial: bool) -> str:
+    def link(label: str, on: bool, key: str) -> str:
+        wanted = {"stale": include_stale, "partial": include_partial}
+        wanted[key] = not on
+        query = "&".join(f"{name}=on" for name, value in wanted.items() if value)
+        href = f"/?{query}" if query else "/"
+        state = "on" if on else "off"
+        return f'<a class="toggle {state}" href="{href}">{label}: {state}</a>'
+
+    return (
+        '<p class="toggles">'
+        + link("Oracle Stale Rounds", include_stale, "stale")
+        + link("Partial Rounds", include_partial, "partial")
+        + "</p>"
+    )
+
+
+def render_page(
+    conn: sqlite3.Connection,
+    include_stale: bool = False,
+    include_partial: bool = False,
+) -> str:
     panels = []
+    entries = {}
     for symbol in sources.SYMBOLS:
-        results = replay(conn, symbol=symbol, strategies=ALL_STRATEGIES)
+        results = replay(conn, symbol=symbol, strategies=ALL_STRATEGIES,
+                         include_stale=include_stale, include_partial=include_partial)
+        for name, result in results.items():
+            for trade in result.trades:
+                entries.setdefault((symbol, trade.round_ending), []).append((name, trade.side))
         scoreable = max((len(r.trades) for r in results.values()), default=0)
         recorded = conn.execute(
             "SELECT COUNT(*) FROM rounds WHERE symbol = ?", (symbol,)
@@ -171,9 +265,12 @@ def render_page(conn: sqlite3.Connection) -> str:
         )
     return _DOCUMENT.format(
         panels="".join(panels),
+        toggles=_toggles(include_stale, include_partial),
+        rounds=_recent_rounds(conn, entries, include_stale, include_partial),
         break_even=f"{BREAK_EVEN_HIT_RATE:.1%}",
         generated=html.escape(format_time(int(datetime.now(timezone.utc).timestamp()))),
         offset=DISPLAY_OFFSET_HOURS,
+        recent=RECENT_ROUNDS,
     )
 
 
@@ -220,6 +317,14 @@ _DOCUMENT = """<!doctype html>
             color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; }}
   .caveat {{ font-size: 12px; color: var(--warn); background: var(--warn-bg);
              border-radius: 6px; padding: 8px 10px; margin: 0 0 12px; }}
+  section.wide {{ max-width: 1140px; margin: 20px auto 0; }}
+  .toggles {{ display: flex; gap: 8px; margin: 0 0 12px; }}
+  .toggle {{ font-size: 12px; text-decoration: none; padding: 4px 10px; border-radius: 999px;
+             border: 1px solid var(--line); color: var(--muted); }}
+  .toggle.on {{ color: var(--ink); border-color: var(--muted); }}
+  .rounds td, .rounds th {{ font-size: 12px; }}
+  .tag {{ display: inline-block; font-size: 11px; padding: 1px 6px; margin-right: 4px;
+          border: 1px solid; border-radius: 4px; }}
   footer {{ padding: 20px 20px 40px; color: var(--muted); font-size: 12px; }}
   footer strong {{ color: var(--ink); }}
 </style>
@@ -231,6 +336,13 @@ _DOCUMENT = """<!doctype html>
      Generated {generated}.</p>
 </header>
 <main>{panels}</main>
+<section class="wide">
+  <h2>Recent Rounds</h2>
+  <p class="meta">The last {recent} settled Rounds, newest first, so the scoring can be
+     checked against individual Rounds rather than taken on trust.</p>
+  {toggles}
+  {rounds}
+</section>
 <footer>
   <p><strong>Hit Rate is the finding.</strong> A 1 USD ticket is most of a typical Round's
      volume, so the Bankroll column assumes prices no real order of that size would get.
