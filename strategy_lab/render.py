@@ -53,18 +53,35 @@ def format_time(moment: int) -> str:
     return datetime.fromtimestamp(moment, DISPLAY_ZONE).strftime("%d %b %H:%M")
 
 
-def segments(points: Sequence[Tuple[int, float]]) -> List[List[Tuple[int, float]]]:
-    """Split a curve wherever the recordings stop, so the drawing never spans a gap."""
+def segments(
+    points: Sequence[Tuple[int, float]],
+    timeline: Sequence[int],
+) -> List[List[Tuple[int, float]]]:
+    """Split a curve wherever the recordings stop, so the drawing never spans an outage.
+
+    `timeline` is every Round that was recorded, which is what decides whether two trades
+    have a hole between them. Judging by the distance between the trades themselves would
+    break the line every time a Strategy declined to act — making selectivity look
+    identical to a Collector that had died, which is exactly the confusion the break was
+    introduced to prevent.
+    """
+    recorded = sorted(timeline)
     found: List[List[Tuple[int, float]]] = []
     for point in points:
-        if found and point[0] - found[-1][-1][0] <= GAP_SECONDS:
+        if found and _recorded_throughout(found[-1][-1][0], point[0], recorded):
             found[-1].append(point)
         else:
             found.append([point])
     return found
 
 
-def _chart(symbol: str, results, span: Optional[Tuple[int, int]]) -> str:
+def _recorded_throughout(earlier: int, later: int, recorded: Sequence[int]) -> bool:
+    """Whether Rounds were recorded continuously between two moments."""
+    span = [earlier] + [t for t in recorded if earlier < t < later] + [later]
+    return all(b - a <= GAP_SECONDS for a, b in zip(span, span[1:]))
+
+
+def _chart(symbol: str, results, span: Optional[Tuple[int, int]], timeline) -> str:
     curves = {name: result.curve for name, result in results.items()}
     drawn = [point for curve in curves.values() for point in curve]
     if not drawn or span is None:
@@ -113,7 +130,7 @@ def _chart(symbol: str, results, span: Optional[Tuple[int, int]]) -> str:
 
     for name, curve in curves.items():
         colour = COLOURS.get(name, "#64748b")
-        for piece in segments(curve):
+        for piece in segments(curve, timeline):
             if len(piece) == 1:
                 moment, value = piece[0]
                 parts.append(
@@ -281,13 +298,24 @@ def render_page(
             """,
             (symbol,),
         ).fetchone()[0]
+        timeline = [
+            row["ending"]
+            for row in conn.execute(
+                """
+                SELECT ending FROM rounds
+                 WHERE symbol = ? AND winner IS NOT NULL AND COALESCE(unsettled, 0) = 0
+                 ORDER BY ending
+                """,
+                (symbol,),
+            )
+        ]
         drawn = [point for result in results.values() for point in result.curve]
         span = (min(p[0] for p in drawn), max(p[0] for p in drawn)) if drawn else None
         panels.append(
             f'<section><h2>{html.escape(symbol)}</h2>'
             f'<p class="meta">{recorded} Rounds recorded · {scoreable} scoreable</p>'
             f"{_table(symbol, results, rebuilt, scoreable)}"
-            f"{_chart(symbol, results, span)}</section>"
+            f"{_chart(symbol, results, span, timeline)}</section>"
         )
     return _DOCUMENT.format(
         panels="".join(panels),

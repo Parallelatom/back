@@ -38,25 +38,47 @@ def a_round(ingest, symbol=BTC, ending=T0 + GRID, strike=100.0, close=101.0):
 
 
 class TestBreakingTheLineAcrossGaps:
-    """A straight segment across an outage reads as a quiet market. It is not one."""
+    """A break must mean one thing only: nothing was recorded here.
+
+    A Strategy declining to trade is not a gap in the recordings, and drawing it as one
+    would make a selective Strategy look like a broken Collector.
+    """
+
+    def timeline(self, count, start=T0):
+        return [start + n * GRID for n in range(count)]
 
     def test_consecutive_rounds_stay_in_one_segment(self):
         points = [(T0 + n * GRID, 10.0) for n in range(4)]
 
-        assert len(segments(points)) == 1
+        assert len(segments(points, self.timeline(4))) == 1
 
     def test_a_missing_stretch_splits_the_curve(self):
         points = [(T0, 10.0), (T0 + GRID, 10.0), (T0 + 20 * GRID, 10.0)]
+        recorded = [T0, T0 + GRID, T0 + 20 * GRID]
 
-        assert len(segments(points)) == 2
+        assert len(segments(points, recorded)) == 2
 
     def test_each_side_of_a_gap_keeps_its_own_points(self):
         points = [(T0, 10.0), (T0 + GRID, 9.0), (T0 + 30 * GRID, 8.0), (T0 + 31 * GRID, 7.0)]
+        recorded = [p[0] for p in points]
 
-        assert [len(s) for s in segments(points)] == [2, 2]
+        assert [len(s) for s in segments(points, recorded)] == [2, 2]
+
+    def test_a_strategy_that_skipped_rounds_keeps_one_unbroken_line(self):
+        """Delta Edge trades about half the Rounds. Its curve is not full of outages."""
+        recorded = self.timeline(10)
+        points = [(recorded[n], 10.0) for n in (0, 3, 7, 9)]
+
+        assert len(segments(points, recorded)) == 1
+
+    def test_a_real_outage_still_breaks_a_selective_strategys_line(self):
+        recorded = self.timeline(4) + self.timeline(4, start=T0 + 40 * GRID)
+        points = [(recorded[0], 10.0), (recorded[2], 10.0), (recorded[5], 10.0)]
+
+        assert len(segments(points, recorded)) == 2
 
     def test_an_empty_curve_has_no_segments(self):
-        assert segments([]) == []
+        assert segments([], []) == []
 
 
 class TestDisplayedTime:
