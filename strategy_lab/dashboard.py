@@ -39,6 +39,7 @@ class Handler(BaseHTTPRequestHandler):
                     conn,
                     include_stale="stale" in query,
                     include_partial="partial" in query,
+                    page=self._page_of(query),
                 ).encode("utf-8")
             finally:
                 conn.close()
@@ -46,6 +47,13 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("could not render the page")
             return self._send(500, "text/plain; charset=utf-8", b"could not read the recordings")
         self._send(200, "text/html; charset=utf-8", body)
+
+    @staticmethod
+    def _page_of(query) -> int:
+        try:
+            return max(1, int(query.get("page", ["1"])[0]))
+        except (TypeError, ValueError):
+            return 1
 
     def _send(self, status: int, content_type: str, body: bytes) -> None:
         self.send_response(status)

@@ -175,26 +175,68 @@ def _table(symbol: str, results, rebuilt: int, scoreable: int) -> str:
     )
 
 
-def _recent_rounds(conn, entries, include_stale: bool, include_partial: bool) -> str:
+def _round_filters(include_stale: bool, include_partial: bool) -> str:
+    return (
+        "WHERE winner IS NOT NULL AND COALESCE(unsettled, 0) = 0"
+        + ("" if include_partial else " AND COALESCE(partial, 0) = 0")
+        + ("" if include_stale else " AND COALESCE(oracle_stale, 0) = 0")
+    )
+
+
+def _query(include_stale: bool, include_partial: bool, page: Optional[int] = None) -> str:
+    """The page's own address, so a link never silently drops the reader's other choices."""
+    parts = []
+    if include_stale:
+        parts.append("stale=on")
+    if include_partial:
+        parts.append("partial=on")
+    if page and page > 1:
+        parts.append(f"page={page}")
+    return f"/?{'&'.join(parts)}" if parts else "/"
+
+
+def _pager(page: int, pages: int, total: int, first: int, last: int,
+           include_stale: bool, include_partial: bool) -> str:
+    if pages <= 1:
+        return ""
+    links = []
+    if page > 1:
+        links.append(
+            f'<a class="page" href="{_query(include_stale, include_partial, page - 1)}">Newer</a>'
+        )
+    if page < pages:
+        links.append(
+            f'<a class="page" href="{_query(include_stale, include_partial, page + 1)}">Older</a>'
+        )
+    return (
+        f'<p class="pager"><span class="meta">Showing {first}-{last} of {total}'
+        f" · page {page} of {pages}</span>{''.join(links)}</p>"
+    )
+
+
+def _recent_rounds(conn, entries, include_stale: bool, include_partial: bool,
+                   page: int = 1) -> str:
     """The last few Rounds, one per line, so the scoring can be checked rather than trusted.
 
     Charts hide arithmetic mistakes well. A Round showing its Strike, its close, who won and
     who entered does not.
     """
-    rows = conn.execute(
-        f"""
-        SELECT symbol, ending, strike, final_price, winner, source, oracle_stale, partial
-          FROM rounds
-         WHERE winner IS NOT NULL
-           AND COALESCE(unsettled, 0) = 0
-           {"" if include_partial else "AND COALESCE(partial, 0) = 0"}
-           {"" if include_stale else "AND COALESCE(oracle_stale, 0) = 0"}
-         ORDER BY ending DESC LIMIT ?
-        """,
-        (RECENT_ROUNDS,),
-    ).fetchall()
-    if not rows:
+    where = _round_filters(include_stale, include_partial)
+    total = conn.execute(f"SELECT COUNT(*) FROM rounds {where}").fetchone()[0]
+    if not total:
         return '<p class="meta">No settled Rounds recorded yet.</p>'
+
+    pages = max(1, -(-total // RECENT_ROUNDS))
+    # A page past the end lands on the last one rather than on nothing: the list shortens
+    # whenever a filter changes, and an empty screen reads as lost data.
+    page = min(max(page, 1), pages)
+    offset = (page - 1) * RECENT_ROUNDS
+
+    rows = conn.execute(
+        f"SELECT symbol, ending, strike, final_price, winner, source, oracle_stale, partial"
+        f"  FROM rounds {where} ORDER BY ending DESC LIMIT ? OFFSET ?",
+        (RECENT_ROUNDS, offset),
+    ).fetchall()
 
     lines = []
     for row in rows:
@@ -221,11 +263,13 @@ def _recent_rounds(conn, entries, include_stale: bool, include_partial: bool) ->
             f"<td>{entered}</td>"
             f'<td class="meta">{" ".join(flags)}</td></tr>'
         )
+    pager = _pager(page, pages, total, offset + 1, offset + len(rows),
+                   include_stale, include_partial)
     return (
         '<table class="rounds"><thead><tr><th>Settled</th><th>Symbol</th>'
         "<th class='num'>Strike</th><th class='num'>Close</th><th>Won</th>"
         "<th>Entered</th><th></th></tr></thead>"
-        f"<tbody>{''.join(lines)}</tbody></table>"
+        f"<tbody>{''.join(lines)}</tbody></table>{pager}"
     )
 
 
@@ -233,8 +277,9 @@ def _toggles(include_stale: bool, include_partial: bool) -> str:
     def link(label: str, on: bool, key: str) -> str:
         wanted = {"stale": include_stale, "partial": include_partial}
         wanted[key] = not on
-        query = "&".join(f"{name}=on" for name, value in wanted.items() if value)
-        href = f"/?{query}" if query else "/"
+        # Deliberately back to the first page: changing a filter shortens the list, and
+        # staying on page nine of a list that now has three would show nothing at all.
+        href = _query(wanted["stale"], wanted["partial"])
         state = "on" if on else "off"
         return f'<a class="toggle {state}" href="{href}">{label}: {state}</a>'
 
@@ -276,6 +321,7 @@ def render_page(
     conn: sqlite3.Connection,
     include_stale: bool = False,
     include_partial: bool = False,
+    page: int = 1,
 ) -> str:
     panels = []
     entries = {}
@@ -321,11 +367,10 @@ def render_page(
         panels="".join(panels),
         alarm=_pricing_alarm(conn),
         toggles=_toggles(include_stale, include_partial),
-        rounds=_recent_rounds(conn, entries, include_stale, include_partial),
+        rounds=_recent_rounds(conn, entries, include_stale, include_partial, page),
         break_even=f"{BREAK_EVEN_HIT_RATE:.1%}",
         generated=html.escape(format_time(int(datetime.now(timezone.utc).timestamp()))),
         offset=DISPLAY_OFFSET_HOURS,
-        recent=RECENT_ROUNDS,
     )
 
 
@@ -379,6 +424,10 @@ _DOCUMENT = """<!doctype html>
   .toggle {{ font-size: 12px; text-decoration: none; padding: 4px 10px; border-radius: 999px;
              border: 1px solid var(--line); color: var(--muted); }}
   .toggle.on {{ color: var(--ink); border-color: var(--muted); }}
+  .pager {{ display: flex; align-items: center; gap: 10px; margin: 12px 0 0; }}
+  .pager .meta {{ flex: 1; margin: 0; }}
+  .page {{ font-size: 12px; text-decoration: none; padding: 4px 12px; border-radius: 6px;
+           border: 1px solid var(--line); color: var(--ink); }}
   .rounds td, .rounds th {{ font-size: 12px; }}
   .tag {{ display: inline-block; font-size: 11px; padding: 1px 6px; margin-right: 4px;
           border: 1px solid; border-radius: 4px; }}
@@ -396,8 +445,8 @@ _DOCUMENT = """<!doctype html>
 <main>{panels}</main>
 <section class="wide">
   <h2>Recent Rounds</h2>
-  <p class="meta">The last {recent} settled Rounds, newest first, so the scoring can be
-     checked against individual Rounds rather than taken on trust.</p>
+  <p class="meta">Settled Rounds, newest first, so the scoring can be checked against
+     individual Rounds rather than taken on trust.</p>
   {toggles}
   {rounds}
 </section>

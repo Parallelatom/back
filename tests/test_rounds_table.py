@@ -180,3 +180,86 @@ class TestPrecision:
         a_round(ingest, strike=100000.5, close=100001.5)
 
         assert "100001.5" in rounds_table(render_page(ingest.conn))
+
+
+class TestPaging:
+    """Fifty Rounds is about half a day. The record is meant to outlive that."""
+
+    def many(self, ingest, count):
+        for n in range(count):
+            a_round(ingest, ending=T0 + (n + 1) * GRID, strike=1000.0 + n, close=1001.0 + n)
+
+    def strikes_on(self, ingest, **kwargs):
+        table = rounds_table(render_page(ingest.conn, **kwargs))
+        return re.findall(r'<td class="num">(\d+)</td>', table)[::2]  # strike column only
+
+    def test_the_first_page_holds_the_newest_rounds(self, ingest):
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        strikes = self.strikes_on(ingest)
+        assert len(strikes) == RECENT_ROUNDS
+        assert strikes[0] == str(1000 + RECENT_ROUNDS + 9)
+
+    def test_the_second_page_continues_where_the_first_stopped(self, ingest):
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        first = self.strikes_on(ingest, page=1)
+        second = self.strikes_on(ingest, page=2)
+        assert len(second) == 10
+        assert not set(first) & set(second)
+        assert int(second[0]) < int(first[-1])
+
+    def test_a_next_link_is_offered_while_there_is_more(self, ingest):
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        assert "page=2" in render_page(ingest.conn)
+
+    def test_the_last_page_offers_no_next(self, ingest):
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        assert "page=3" not in render_page(ingest.conn, page=2)
+
+    def test_the_first_page_offers_no_previous(self, ingest):
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        assert "page=0" not in render_page(ingest.conn)
+
+    def test_a_later_page_can_get_back(self, ingest):
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        page = render_page(ingest.conn, page=2)
+        newer = re.search(r'<a class="page" href="([^"]*)">Newer</a>', page)
+        assert newer, "no way back from page two"
+        assert "page=" not in newer.group(1)  # page one needs no number
+
+    def test_no_pager_is_shown_when_everything_fits(self, ingest):
+        self.many(ingest, 3)
+
+        assert "page=" not in render_page(ingest.conn)
+
+    def test_the_toggles_survive_turning_the_page(self, ingest):
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        page = render_page(ingest.conn, include_stale=True)
+        assert "stale=on" in page
+        assert re.search(r'href="/\?[^"]*page=2[^"]*"', page)
+        link = re.search(r'href="(/\?[^"]*page=2[^"]*)"', page).group(1)
+        assert "stale=on" in link
+
+    def test_changing_a_toggle_returns_to_the_first_page(self, ingest):
+        """Otherwise a filter that shortens the list drops you past the end of it."""
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        page = render_page(ingest.conn, page=2)
+        toggle = re.search(r'class="toggle[^"]*" href="([^"]+)"', page).group(1)
+        assert "page=" not in toggle
+
+    def test_a_page_beyond_the_end_shows_the_last_one_rather_than_nothing(self, ingest):
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        assert len(self.strikes_on(ingest, page=99)) == 10
+
+    def test_the_range_on_show_is_stated(self, ingest):
+        self.many(ingest, RECENT_ROUNDS + 10)
+
+        assert f"1-{RECENT_ROUNDS} of {RECENT_ROUNDS + 10}" in render_page(ingest.conn)
