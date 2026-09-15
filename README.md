@@ -32,15 +32,51 @@ explicitly stopped, and why deploying sooner beats deploying tidily.
 
 ## The dashboard
 
-`./deploy.sh` starts it alongside the Collector, bound to `127.0.0.1:8000` on the host. To
-look at it from your laptop before the tunnel exists:
+`./deploy.sh` starts it alongside the Collector. It listens on `127.0.0.1:8000` only, so
+nothing is exposed to the internet by default and no inbound port needs opening on the VPS
+firewall. It mounts the database read-only, so it cannot disturb collection whatever it does.
+
+Before the tunnel exists, reach it over SSH:
 
 ```sh
 ssh -L 8000:localhost:8000 user@your-vps
 ```
 
-then open <http://localhost:8000>. It mounts the database read-only, so it cannot disturb
-collection whatever it does.
+then open <http://localhost:8000>. If something already holds port 8000 on the host, set
+`STRATEGY_LAB_HOST_PORT` in `.env` to publish it elsewhere; the tunnel is unaffected either
+way, since it reaches the dashboard over the compose network rather than through the host.
+
+## Publishing it on your own subdomain
+
+The connector dials out to Cloudflare, so the VPS still accepts no inbound connections. Who
+may look is decided by Cloudflare Access, not by anything in this repository.
+
+**In the Cloudflare dashboard** (these steps need your login, so they cannot be scripted here):
+
+1. **Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared.** Name it, then copy
+   the token it shows. Ignore the install instructions — `docker compose` runs the connector.
+2. On the tunnel's **Public Hostname** tab, add a hostname: pick your subdomain, set the
+   service to **HTTP** and the URL to `dashboard:8000`. That name resolves on the compose
+   network, which is why no port has to be published.
+3. **Zero Trust → Access → Applications → Add an application → Self-hosted.** Point it at
+   the same hostname and add a policy allowing your own email address. Do this *before* the
+   first deploy: between step 2 and this one the page is open to anyone who finds the name.
+
+**On the VPS:**
+
+```sh
+cp .env.example .env    # then paste the token into it
+./deploy.sh
+```
+
+`deploy.sh` starts the connector only when a token is present, because cloudflared without
+one restarts forever. `.env` is gitignored.
+
+To check it took:
+
+```sh
+docker compose logs tunnel | grep -i registered
+```
 
 ## Reading the results
 

@@ -32,10 +32,28 @@ services:
       # Read-only: the dashboard must never be able to disturb the recordings.
       - ./data:/data:ro
     ports:
-      # Bound to the loopback interface. Reaching it from outside is the tunnel's job, so
-      # that authentication lives in Cloudflare Access rather than in this code.
-      - "127.0.0.1:8000:8000"
+      # Loopback only. Nothing listens on a public interface, so no inbound port has to be
+      # opened on the VPS: the tunnel dials out. This mapping exists purely so that
+      # `ssh -L 8000:localhost:8000` still works when the tunnel is not set up.
+      - "127.0.0.1:${STRATEGY_LAB_HOST_PORT:-8000}:8000"
     environment:
       STRATEGY_LAB_DB: /data/lab.db
       STRATEGY_LAB_LOG: INFO
+    logging: *logging
+
+  # Reaching the dashboard from outside. The connector dials out to Cloudflare, so the VPS
+  # accepts no inbound connections at all, and who may look is decided by Cloudflare Access
+  # rather than by anything in this repository (ADR-0001 leaves nothing here to protect,
+  # but a page nobody was invited to read should still not be published).
+  #
+  # Only runs when asked for: `docker compose --profile tunnel up -d`, which deploy.sh does
+  # automatically once CLOUDFLARE_TUNNEL_TOKEN is set. Without a token cloudflared would
+  # restart forever.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    depends_on:
+      - dashboard
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:-}"]
     logging: *logging
