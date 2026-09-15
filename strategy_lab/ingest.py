@@ -406,6 +406,30 @@ class Ingest:
                 (symbol, ending, ts, side, delta, held, self.code_version),
             )
 
+    def record_quote_check(self, pool: str, gross: int, local_shares: Optional[int],
+                           local_fees: Optional[int], chain_shares: Optional[int],
+                           chain_fees: Optional[int], ts: int,
+                           note: Optional[str] = None) -> bool:
+        """Write down what we think a ticket buys and what the contract says it buys.
+
+        Returns whether the two agreed. A check that never reached the chain agrees with
+        nothing and disagrees with nothing: it is recorded with its reason and no verdict.
+        """
+        agrees = None
+        if chain_shares is not None and chain_fees is not None:
+            agrees = int(local_shares == chain_shares and local_fees == chain_fees)
+        self.conn.execute(
+            """
+            INSERT INTO quote_checks (ts, pool_address, gross, local_shares, chain_shares,
+                                      local_fees, chain_fees, agrees, note, code_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (ts, pool, gross, local_shares, chain_shares, local_fees, chain_fees,
+             agrees, note, self.code_version),
+        )
+        self.conn.commit()
+        return bool(agrees)
+
     def finalise_closed_rounds(self, now: int) -> int:
         """Summarise every Round that has closed and not yet been summarised."""
         pending = self.conn.execute(

@@ -30,6 +30,8 @@ POLL_SECONDS = float(os.environ.get("STRATEGY_LAB_POLL_SECONDS", "3"))
 BACKFILL_DELAY_SECONDS = 30
 BACKFILL_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_BACKFILL_SECONDS", "900"))
 RECONCILE_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_RECONCILE_SECONDS", "30"))
+VERIFY_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_VERIFY_SECONDS", "86400"))
+VERIFY_DELAY_SECONDS = 120
 WS_PING_INTERVAL = 15
 WS_PING_TIMEOUT = 10
 RETRY_MIN = 1
@@ -80,6 +82,64 @@ async def reconcile_reserves(ingest: Ingest, graph: Graph, stop: asyncio.Event) 
             except Exception:
                 log.exception("reserve reconcile failed for %s", symbol)
             await _sleep(stop, sources.jittered(RECONCILE_EVERY_SECONDS / len(sources.SYMBOLS)))
+
+
+async def verify_pricing(ingest: Ingest, stop: asyncio.Event) -> None:
+    """Ask the contract what a ticket really buys, and compare it with what we compute.
+
+    The fee lives in per-market storage rather than being a constant of the protocol, so a
+    change to it would skew every Fill silently. Reaching the chain is also the only way to
+    catch our own Reserves having drifted. Failing to reach it costs nothing: collection is
+    never interrupted for this.
+    """
+    from .amm import Reserves, fill
+    from .chain import Arbitrum
+
+    chain = Arbitrum()
+    await _sleep(stop, VERIFY_DELAY_SECONDS)
+    while not stop.is_set():
+        for symbol in sources.SYMBOLS:
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _verify_one, ingest, chain, symbol
+                )
+            except Exception:
+                log.exception("pricing check failed for %s", symbol)
+        await _sleep(stop, VERIFY_EVERY_SECONDS)
+
+
+def _verify_one(ingest: Ingest, chain, symbol: str) -> None:
+    from .amm import Reserves, fill
+
+    gross = 1_000_000
+    row = ingest.conn.execute(
+        """
+        SELECT r.pool_address, r.outcome_up, v.q_up, v.q_down
+          FROM rounds r
+          JOIN reserves v ON v.symbol = r.symbol AND v.round_ending = r.ending
+         WHERE r.symbol = ? AND r.winner IS NULL AND r.pool_address IS NOT NULL
+         ORDER BY r.ending DESC, v.rowid DESC LIMIT 1
+        """,
+        (symbol,),
+    ).fetchone()
+    if row is None:
+        return
+    local = fill(Reserves(up=row["q_up"], down=row["q_down"]), "UP", gross)
+    quoted = chain.quote(row["pool_address"], row["outcome_up"], gross)
+    agreed = ingest.record_quote_check(
+        row["pool_address"], gross=gross,
+        local_shares=local.shares, local_fees=local.fees,
+        chain_shares=quoted.shares if quoted else None,
+        chain_fees=quoted.fees if quoted else None,
+        ts=int(time.time()),
+        note=None if quoted else "could not reach the chain",
+    )
+    if quoted and not agreed:
+        log.error(
+            "pricing disagrees with the contract for %s: local %s shares / %s fees, "
+            "chain %s shares / %s fees",
+            symbol, local.shares, local.fees, quoted.shares, quoted.fees,
+        )
 
 
 async def close_out_rounds(ingest: Ingest, stop: asyncio.Event) -> None:
@@ -204,6 +264,7 @@ async def run(db_path: str = DB_PATH, duration: Optional[float] = None) -> None:
         asyncio.ensure_future(backfill_rounds(ingest, graph, stop)),
         asyncio.ensure_future(reconcile_reserves(ingest, graph, stop)),
         asyncio.ensure_future(close_out_rounds(ingest, stop)),
+        asyncio.ensure_future(verify_pricing(ingest, stop)),
     ]
     if duration is not None:
         tasks.append(asyncio.ensure_future(_stop_after(stop, duration)))

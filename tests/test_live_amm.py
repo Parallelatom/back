@@ -113,3 +113,40 @@ def test_the_fee_the_exchange_charges_is_still_the_one_we_assume(trades):
     most_common, _ = sizes.most_common(1)[0]
 
     assert most_common == 983_000, f"the commonest net size is now {most_common}"
+
+
+def test_the_contract_still_prices_the_way_we_do():
+    """The daily check, run once here against a live Round.
+
+    This is the check that would notice a changed fee. It compares what the contract says a
+    1 USD ticket buys with what the local rule says, given the Reserves the contract itself
+    implies — so a disagreement means the rule has drifted, not that our bookkeeping has.
+    """
+    from strategy_lab.amm import LIQUIDITY, Reserves, fill
+    from strategy_lab.chain import Arbitrum
+    from strategy_lab.sources import Graph
+
+    campaign = Graph().query(
+        """query { campaignBySymbol(symbol: "BTC", category: "15mins") {
+             poolAddress outcomes { name identifier } } }""",
+        {},
+    )
+    live = (campaign or {}).get("campaignBySymbol")
+    assert live, "no live BTC Round to check against"
+    up = next(o["identifier"] for o in live["outcomes"] if "above" in o["name"].lower())
+
+    chain = Arbitrum()
+    price = chain.price(live["poolAddress"], up)
+    assert price is not None, "the contract reported no price for a live Round"
+
+    # Reserves implied by the contract's own price, so only the pricing rule is under test.
+    down = round(LIQUIDITY * (price / (1 - price)) ** 0.5)
+    reserves = Reserves(up=round(LIQUIDITY * LIQUIDITY / down), down=down)
+
+    quoted = chain.quote(live["poolAddress"], up, 1_000_000)
+    local = fill(reserves, "UP", 1_000_000)
+
+    assert local.fees == quoted.fees, "the market's fee is no longer 1.7%"
+    assert abs(local.shares - quoted.shares) <= max(2, quoted.shares // 10_000), (
+        f"local rule says {local.shares} shares, the contract says {quoted.shares}"
+    )

@@ -106,24 +106,32 @@ class Graph:
 
 
     def current_reserves(self, symbol: str):
-        """The exchange's own view of a Round's Reserves: (pool, up, down), or None.
-
-        An untraded Round reports no shares at all, which means the even opening Reserves
-        rather than missing data (ADR-0004).
-        """
+        """The exchange's own view of a Round's Reserves: (pool, up, down), or None."""
         data = self.query(_SHARES_QUERY, {"symbol": symbol, "category": CATEGORY})
-        campaign = (data or {}).get("campaignBySymbol")
+        return self.reserves_from_campaign((data or {}).get("campaignBySymbol"))
+
+    @staticmethod
+    def reserves_from_campaign(campaign):
+        """Reserves as the exchange reports them, or None when it has not said.
+
+        An empty `shares` is *not* an untouched pool. The exchange's indexer lags the
+        chain, and a live Round that has already been traded reports no shares at all —
+        confirmed against a pool the chain priced at 0.039 while this field was empty.
+        Reading that as the even opening Reserves would overwrite correct figures with
+        wrong ones, which is worse than having no answer.
+        """
         if not isinstance(campaign, Mapping) or not campaign.get("poolAddress"):
+            return None
+        shares = campaign.get("shares") or ()
+        if not shares:
             return None
         up_ids = {
             _bare(outcome.get("identifier"))
             for outcome in campaign.get("outcomes") or ()
             if "above" in (outcome.get("name") or "").lower()
         }
-        from .amm import OPENING_RESERVE
-
-        up = down = OPENING_RESERVE
-        for share in campaign.get("shares") or ():
+        up = down = None
+        for share in shares:
             try:
                 amount = int(share.get("shares"))
             except (TypeError, ValueError):
@@ -132,6 +140,8 @@ class Graph:
                 up = amount
             else:
                 down = amount
+        if up is None or down is None:
+            return None
         return campaign["poolAddress"], up, down
 
     def past_rounds(self):

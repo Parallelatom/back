@@ -229,6 +229,32 @@ def _toggles(include_stale: bool, include_partial: bool) -> str:
     )
 
 
+def _pricing_alarm(conn) -> str:
+    """Say loudly when the local pricing rule last disagreed with the contract.
+
+    A disagreement left in a log is found weeks later, by which time it has skewed every
+    figure computed since.
+    """
+    row = conn.execute(
+        "SELECT ts, local_shares, chain_shares, local_fees, chain_fees FROM quote_checks "
+        " WHERE agrees IS NOT NULL ORDER BY ts DESC, rowid DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return ""
+    latest = conn.execute(
+        "SELECT agrees FROM quote_checks WHERE agrees IS NOT NULL ORDER BY ts DESC, rowid DESC LIMIT 1"
+    ).fetchone()
+    if latest["agrees"]:
+        return ""
+    return (
+        '<p class="alarm">The pricing rule and the contract <strong>disagree</strong>. '
+        f"Checked {html.escape(format_time(row['ts']))}: a 1 USD ticket comes to "
+        f"{row['local_shares']} shares here and {row['chain_shares']} on chain, with fees "
+        f"of {row['local_fees']} against {row['chain_fees']}. Every Fill computed since is "
+        "suspect until this is understood.</p>"
+    )
+
+
 def render_page(
     conn: sqlite3.Connection,
     include_stale: bool = False,
@@ -265,6 +291,7 @@ def render_page(
         )
     return _DOCUMENT.format(
         panels="".join(panels),
+        alarm=_pricing_alarm(conn),
         toggles=_toggles(include_stale, include_partial),
         rounds=_recent_rounds(conn, entries, include_stale, include_partial),
         break_even=f"{BREAK_EVEN_HIT_RATE:.1%}",
@@ -315,6 +342,8 @@ _DOCUMENT = """<!doctype html>
   .tick {{ fill: var(--muted); font-size: 10px; }}
   .empty {{ display: flex; align-items: center; justify-content: center;
             color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; }}
+  .alarm {{ max-width: 1140px; margin: 14px auto 0; padding: 10px 14px; border-radius: 8px;
+            background: #7f1d1d; color: #fee2e2; font-size: 13px; }}
   .caveat {{ font-size: 12px; color: var(--warn); background: var(--warn-bg);
              border-radius: 6px; padding: 8px 10px; margin: 0 0 12px; }}
   section.wide {{ max-width: 1140px; margin: 20px auto 0; }}
@@ -335,6 +364,7 @@ _DOCUMENT = """<!doctype html>
   <p class="sub">Paper trading only — no order is ever placed. Times in UTC+{offset}.
      Generated {generated}.</p>
 </header>
+{alarm}
 <main>{panels}</main>
 <section class="wide">
   <h2>Recent Rounds</h2>
