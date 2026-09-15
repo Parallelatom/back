@@ -7,3 +7,7 @@ __pycache__/
 .venv/
 .DS_Store
 .env
+.agents/
+.claude/
+.scratch/
+skills-lock.json
