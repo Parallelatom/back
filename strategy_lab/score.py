@@ -1,0 +1,58 @@
+"""Print what the recordings say, for reading in a terminal.
+
+Hit Rate is shown first and Bankroll second, deliberately. The markets are thin enough that
+a 1 USD ticket is most of a Round's volume, so the money column is indicative and the
+accuracy column is the finding (ADR-0003).
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+from . import sources
+from .db import connect
+from .replay import BASELINES, STARTING_BANKROLL, replay
+
+BREAK_EVEN_HIT_RATE = 1 / 1.314422  # +0.314 on a win against -1.00 on a loss
+
+
+def render(conn, strategies=None) -> str:
+    strategies = list(strategies if strategies is not None else BASELINES)
+    lines = []
+    for symbol in sources.SYMBOLS:
+        results = replay(conn, symbol=symbol, strategies=strategies)
+        available = conn.execute(
+            "SELECT COUNT(*) FROM rounds WHERE symbol = ?", (symbol,)
+        ).fetchone()[0]
+        scoreable = max((len(r.trades) for r in results.values()), default=0)
+        lines.append(f"\n{symbol}  ({available} Rounds recorded, {scoreable} scoreable)")
+        lines.append(f"  {'Strategy':<16}{'Hit Rate':>10}{'Trades':>9}{'Bankroll':>11}   Note")
+        for strategy in strategies:
+            result = results[strategy.name]
+            rate = "  —" if result.hit_rate is None else f"{result.hit_rate:.1%}"
+            note = ""
+            if result.ruined_at is not None:
+                note = f"ruined at Round {result.ruined_at}"
+            elif result.hit_rate is not None and result.hit_rate >= BREAK_EVEN_HIT_RATE:
+                note = "above break-even"
+            lines.append(
+                f"  {strategy.name:<16}{rate:>10}{len(result.trades):>9}"
+                f"{result.bankroll:>10.2f}   {note}"
+            )
+    lines.append(
+        f"\nStake {1.0:.2f} per Round from {STARTING_BANKROLL:.2f}. A win returns about "
+        f"+0.31 and a loss costs 1.00,\nso break-even needs a Hit Rate of "
+        f"{BREAK_EVEN_HIT_RATE:.1%}. Hit Rate is the finding; Bankroll is indicative."
+    )
+    return "\n".join(lines)
+
+
+def main() -> None:
+    path = os.environ.get("STRATEGY_LAB_DB", "data/lab.db")
+    if not os.path.exists(path):
+        sys.exit(f"no recordings at {path}; run the Collector first")
+    print(render(connect(path)))
+
+
+if __name__ == "__main__":
+    main()

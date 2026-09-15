@@ -30,6 +30,16 @@ the Collector is down is a stretch that can never be recovered for oil, and beyo
 hours it cannot be recovered for BTC either. That is why the Collector restarts unless
 explicitly stopped, and why deploying sooner beats deploying tidily.
 
+## Reading the results
+
+```sh
+STRATEGY_LAB_DB=data/lab.db .venv/bin/python -m strategy_lab.score
+```
+
+Hit Rate is the finding. The Bankroll column is indicative only: a 1 USD ticket is most of a
+typical Round's volume, so no real order of that size would fill at the prices it assumes.
+Break-even sits at a 76.1% Hit Rate, because a win returns about +0.31 against a loss of 1.00.
+
 ## Development
 
 ```sh
