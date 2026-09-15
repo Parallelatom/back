@@ -83,11 +83,14 @@ class Ingest:
         arriving again — which happens on every reconnection, since the feed replays its
         snapshot — is stored once.
         """
+        self._insert_price(symbol, ts, price)
+        self.conn.commit()
+
+    def _insert_price(self, symbol: str, ts: int, price: float) -> None:
         self.conn.execute(
             "INSERT OR IGNORE INTO oracle_prices (symbol, ts, price, code_version) VALUES (?, ?, ?, ?)",
             (symbol, ts, price, self.code_version),
         )
-        self.conn.commit()
 
     def reconstruct_rounds(self, symbol: str) -> int:
         """Rebuild past Rounds for a Symbol from its price series alone.
@@ -167,8 +170,11 @@ class Ingest:
         """
         if not isinstance(message, Mapping):
             return
+        # One commit per message, not per price: the opening snapshot carries thousands of
+        # observations, and committing each separately turns a burst into minutes of work.
         for entry in _price_entries(message):
             self._observe_price_entry(entry)
+        self.conn.commit()
 
     def _observe_price_entry(self, entry: Mapping[str, Any]) -> None:
         symbol = entry.get("base")
@@ -178,7 +184,7 @@ class Ingest:
             return
         if not isinstance(amount, (int, float)) or isinstance(amount, bool):
             return
-        self.observe_price(symbol, float(amount), ts)
+        self._insert_price(symbol, ts, float(amount))
 
     def open_round(self, symbol: str) -> Optional[RoundMeta]:
         return self._open.get(symbol)

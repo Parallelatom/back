@@ -1,0 +1,20 @@
+services:
+  collector:
+    build:
+      context: .
+      args:
+        STRATEGY_LAB_VERSION: ${STRATEGY_LAB_VERSION:-unknown}
+    # Collection uptime is the one thing this project cannot buy back later: the feed keeps
+    # about 5.6 hours of BTC history and none at all for XYZCL.
+    restart: unless-stopped
+    volumes:
+      # A bind mount, not a named volume, so the database can simply be copied off the host.
+      - ./data:/data
+    environment:
+      STRATEGY_LAB_DB: /data/lab.db
+      STRATEGY_LAB_LOG: INFO
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

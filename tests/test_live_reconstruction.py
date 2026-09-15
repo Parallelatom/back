@@ -49,7 +49,7 @@ def reconstructed(tmp_path_factory):
     conn = connect(str(tmp_path_factory.mktemp("live") / "lab.db"))
     initialise(conn)
     ingest = Ingest(conn, code_version="livetest")
-    asyncio.get_event_loop().run_until_complete(_collect_snapshot(ingest))
+    asyncio.run(_collect_snapshot(ingest))
     for symbol in sources.SYMBOLS:
         ingest.reconstruct_rounds(symbol)
     return ingest

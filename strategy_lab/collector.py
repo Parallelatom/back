@@ -46,7 +46,7 @@ async def poll_rounds(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> None
             if stop.is_set():
                 return
             try:
-                meta = await asyncio.get_event_loop().run_in_executor(
+                meta = await asyncio.get_running_loop().run_in_executor(
                     None, graph.current_round, symbol
                 )
             except Exception:  # a poll must never end the process
@@ -68,7 +68,7 @@ async def backfill_rounds(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> 
     while not stop.is_set():
         try:
             rebuilt = sum(ingest.reconstruct_rounds(symbol) for symbol in sources.SYMBOLS)
-            authoritative = await asyncio.get_event_loop().run_in_executor(
+            authoritative = await asyncio.get_running_loop().run_in_executor(
                 None, graph.past_rounds
             )
             corrected = ingest.apply_authoritative_strikes(authoritative)
@@ -147,7 +147,7 @@ async def run(db_path: str = DB_PATH, duration: Optional[float] = None) -> None:
     log.info("collector %s writing to %s", ingest.code_version, db_path)
 
     stop = asyncio.Event()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop.set)
@@ -182,9 +182,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     duration = os.environ.get("STRATEGY_LAB_RUN_SECONDS")
-    asyncio.get_event_loop().run_until_complete(
-        run(duration=float(duration) if duration else None)
-    )
+    asyncio.run(run(duration=float(duration) if duration else None))
 
 
 if __name__ == "__main__":
