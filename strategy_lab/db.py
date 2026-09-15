@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS rounds (
     source               TEXT    NOT NULL DEFAULT 'live',
     partial              INTEGER NOT NULL DEFAULT 0,
     oracle_stale         INTEGER,
+    unsettled            INTEGER,
     winner               TEXT,
     final_price          REAL,
     settled_at           INTEGER,

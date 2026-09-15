@@ -23,6 +23,18 @@ SYMBOLS = ("BTC", "XYZCL")
 
 WS_ORIGIN = "https://9lives.so"
 PRICES_TABLE = "oracles_ninelives_prices_2"
+# Keyed by pool rather than Symbol, so they are subscribed whole and filtered on arrival.
+POOL_TABLES = ("ninelives_buys_and_sells_1", "ninelives_events_outcome_decided")
+
+_SHARES_QUERY = """
+query ($symbol: String!, $category: String!) {
+  campaignBySymbol(symbol: $symbol, category: $category) {
+    poolAddress
+    shares { identifier shares }
+    outcomes { name identifier }
+  }
+}
+"""
 
 _ROUND_QUERY = """
 query ($symbol: String!, $category: String!) {
@@ -52,6 +64,11 @@ def subscription(symbol: str) -> Dict[str, Any]:
     field = [{"name": "base", "filter_constraints": {"et": symbol}}]
     table = [{"table": PRICES_TABLE, "fields": field}]
     return {"label": symbol, "ask_for_snapshot": table, "add": table}
+
+
+def pool_subscription(table_name: str) -> Dict[str, Any]:
+    table = [{"table": table_name, "fields": []}]
+    return {"label": table_name, "ask_for_snapshot": table, "add": table}
 
 
 class Graph:
@@ -87,6 +104,35 @@ class Graph:
             return None
         return parse_round(symbol, data.get("campaignBySymbol"))
 
+
+    def current_reserves(self, symbol: str):
+        """The exchange's own view of a Round's Reserves: (pool, up, down), or None.
+
+        An untraded Round reports no shares at all, which means the even opening Reserves
+        rather than missing data (ADR-0004).
+        """
+        data = self.query(_SHARES_QUERY, {"symbol": symbol, "category": CATEGORY})
+        campaign = (data or {}).get("campaignBySymbol")
+        if not isinstance(campaign, Mapping) or not campaign.get("poolAddress"):
+            return None
+        up_ids = {
+            _bare(outcome.get("identifier"))
+            for outcome in campaign.get("outcomes") or ()
+            if "above" in (outcome.get("name") or "").lower()
+        }
+        from .amm import OPENING_RESERVE
+
+        up = down = OPENING_RESERVE
+        for share in campaign.get("shares") or ():
+            try:
+                amount = int(share.get("shares"))
+            except (TypeError, ValueError):
+                continue
+            if _bare(share.get("identifier")) in up_ids:
+                up = amount
+            else:
+                down = amount
+        return campaign["poolAddress"], up, down
 
     def past_rounds(self):
         """Every Round the API still remembers, which is roughly the last 2.5 hours.
@@ -145,6 +191,11 @@ def parse_round(symbol: str, campaign: Any) -> Optional[RoundMeta]:
         outcome_up=up,
         outcome_down=down,
     )
+
+
+def _bare(identifier: Any) -> str:
+    text = str(identifier or "").lower()
+    return text[2:] if text.startswith("0x") else text
 
 
 def jittered(seconds: float, spread: float = 0.3) -> float:

@@ -29,6 +29,7 @@ POLL_SECONDS = float(os.environ.get("STRATEGY_LAB_POLL_SECONDS", "3"))
 # rebuild from; then repeated, because it also fills Rounds the live poller missed.
 BACKFILL_DELAY_SECONDS = 30
 BACKFILL_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_BACKFILL_SECONDS", "900"))
+RECONCILE_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_RECONCILE_SECONDS", "30"))
 WS_PING_INTERVAL = 15
 WS_PING_TIMEOUT = 10
 RETRY_MIN = 1
@@ -55,6 +56,46 @@ async def poll_rounds(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> None
             if meta is not None:
                 ingest.observe_round(meta, now=int(time.time()))
             await _sleep(stop, sources.jittered(POLL_SECONDS))
+
+
+async def reconcile_reserves(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> None:
+    """Check the Reserves we derived from the trade feed against the exchange's own answer.
+
+    A dropped trade event would otherwise corrupt the Fill of every Paper Trade for the rest
+    of a Round, silently. The log of disagreements is as valuable as the correction: it is
+    what will eventually say whether the feed can be trusted alone (ADR-0005).
+    """
+    while not stop.is_set():
+        for symbol in sources.SYMBOLS:
+            if stop.is_set():
+                return
+            try:
+                answer = await asyncio.get_running_loop().run_in_executor(
+                    None, graph.current_reserves, symbol
+                )
+                if answer:
+                    pool, up, down = answer
+                    if ingest.apply_remote_reserves(pool, up, down, ts=int(time.time())):
+                        log.warning("reserves diverged for %s; took the exchange\'s answer", symbol)
+            except Exception:
+                log.exception("reserve reconcile failed for %s", symbol)
+            await _sleep(stop, sources.jittered(RECONCILE_EVERY_SECONDS / len(sources.SYMBOLS)))
+
+
+async def close_out_rounds(ingest: Ingest, stop: asyncio.Event) -> None:
+    """Summarise Rounds that have closed, recover any settlement that was missed, and give
+    up on the ones that are never going to resolve."""
+    while not stop.is_set():
+        await _sleep(stop, 60)
+        if stop.is_set():
+            return
+        try:
+            now = int(time.time())
+            ingest.finalise_closed_rounds(now)
+            ingest.settle_from_following_rounds()
+            ingest.mark_unsettled(now)
+        except Exception:
+            log.exception("closing out rounds failed")
 
 
 async def backfill_rounds(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> None:
@@ -93,6 +134,8 @@ async def stream_prices(ingest: Ingest, stop: asyncio.Event) -> None:
             ) as socket:
                 for symbol in sources.SYMBOLS:
                     await socket.send(_dumps(sources.subscription(symbol)))
+                for table_name in sources.POOL_TABLES:
+                    await socket.send(_dumps(sources.pool_subscription(table_name)))
                 log.info("price feed connected")
                 backoff = RETRY_MIN
                 async for raw in socket:
@@ -159,6 +202,8 @@ async def run(db_path: str = DB_PATH, duration: Optional[float] = None) -> None:
         asyncio.ensure_future(stream_prices(ingest, stop)),
         asyncio.ensure_future(poll_rounds(ingest, graph, stop)),
         asyncio.ensure_future(backfill_rounds(ingest, graph, stop)),
+        asyncio.ensure_future(reconcile_reserves(ingest, graph, stop)),
+        asyncio.ensure_future(close_out_rounds(ingest, stop)),
     ]
     if duration is not None:
         tasks.append(asyncio.ensure_future(_stop_after(stop, duration)))
