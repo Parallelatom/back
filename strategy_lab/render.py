@@ -26,6 +26,9 @@ BREAK_EVEN_HIT_RATE = 1 / 1.314422
 # Enough to check the scoring by eye without turning the page into a data dump.
 RECENT_ROUNDS = 50
 
+# A week is enough to see an edge closing without the table becoming a spreadsheet.
+PERIODS_SHOWN = 7
+
 COLOURS = {
     "Delta Edge": "#2563eb",
     "Lock Rider": "#0891b2",
@@ -53,6 +56,42 @@ def format_number(value: Optional[float]) -> str:
 
 def format_time(moment: int) -> str:
     return datetime.fromtimestamp(moment, DISPLAY_ZONE).strftime("%d %b %H:%M")
+
+
+def day_of(moment: int) -> str:
+    return _date_of(moment).strftime("%d %b")
+
+
+def _date_of(moment: int):
+    return datetime.fromtimestamp(moment, DISPLAY_ZONE).date()
+
+
+def periods_table(results, strategies):
+    """Each Strategy's record broken out by the day its Rounds settled.
+
+    A running total is the wrong shape for the question that matters here. An edge in this
+    market closes when other people start taking it, and when that happens the lifetime
+    average keeps looking healthy for a long time while every recent day is a loss.
+    """
+    seen = set()
+    cells = {}
+    for strategy in strategies:
+        for trade in results[strategy.name].trades:
+            date = _date_of(trade.round_ending)
+            seen.add(date)
+            day = day_of(trade.round_ending)
+            won, count = cells.setdefault(strategy.name, {}).get(day, (0, 0))
+            cells[strategy.name][day] = (won + (1 if trade.won else 0), count + 1)
+    if not seen:
+        return [], cells
+    # A continuous run of days, so a day nothing was recorded on shows as a gap rather
+    # than vanishing — the same reason the Bankroll curves break across an outage.
+    span = (max(seen) - min(seen)).days
+    days = [
+        (min(seen) + timedelta(days=offset)).strftime("%d %b")
+        for offset in range(span + 1)
+    ]
+    return days[-PERIODS_SHOWN:], cells
 
 
 def segments(
@@ -293,6 +332,45 @@ def _toggles(include_stale: bool, include_partial: bool) -> str:
     )
 
 
+def _periods_section(conn, include_stale: bool, include_partial: bool) -> str:
+    panels = []
+    for symbol in sources.SYMBOLS:
+        results = replay(conn, symbol=symbol, strategies=ALL_STRATEGIES,
+                         include_stale=include_stale, include_partial=include_partial)
+        days, cells = periods_table(results, ALL_STRATEGIES)
+        if not days:
+            continue
+        header = "".join(f'<th class="num">{html.escape(day)}</th>' for day in days)
+        rows = []
+        for strategy in ALL_STRATEGIES:
+            record = cells.get(strategy.name, {})
+            if not record:
+                continue
+            columns = []
+            for day in days:
+                if day not in record:
+                    columns.append('<td class="num meta">—</td>')
+                    continue
+                won, count = record[day]
+                rate = won / count
+                weak = "" if rate >= BREAK_EVEN_HIT_RATE else " meta"
+                columns.append(
+                    f'<td class="num{weak}">{rate:.0%} <span class="meta">({count})</span></td>'
+                )
+            rows.append(
+                f'<tr><td><span class="dot" style="background:{COLOURS[strategy.name]}">'
+                f"</span>{html.escape(strategy.name)}</td>{''.join(columns)}</tr>"
+            )
+        panels.append(
+            f"<h3>{html.escape(symbol)}</h3>"
+            f'<table class="periods"><thead><tr><th>Strategy</th>{header}</tr></thead>'
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+    if not panels:
+        return '<p class="meta">No settled Rounds recorded yet.</p>'
+    return "".join(panels)
+
+
 def _pricing_alarm(conn) -> str:
     """Say loudly when the local pricing rule last disagreed with the contract.
 
@@ -370,6 +448,7 @@ def render_page(
         alarm=_pricing_alarm(conn),
         toggles=_toggles(include_stale, include_partial),
         rounds=_recent_rounds(conn, entries, include_stale, include_partial, page),
+        periods=_periods_section(conn, include_stale, include_partial),
         break_even=f"{BREAK_EVEN_HIT_RATE:.1%}",
         generated=html.escape(format_time(int(datetime.now(timezone.utc).timestamp()))),
         offset=DISPLAY_OFFSET_HOURS,
@@ -431,6 +510,9 @@ _DOCUMENT = """<!doctype html>
   .page {{ font-size: 12px; text-decoration: none; padding: 4px 12px; border-radius: 6px;
            border: 1px solid var(--line); color: var(--ink); }}
   .rounds td, .rounds th {{ font-size: 12px; }}
+  h3 {{ font-size: 13px; margin: 14px 0 6px; }}
+  .periods td, .periods th {{ font-size: 12px; }}
+  .periods tbody td:first-child {{ width: 38%; }}
   .tag {{ display: inline-block; font-size: 11px; padding: 1px 6px; margin-right: 4px;
           border: 1px solid; border-radius: 4px; }}
   footer {{ padding: 20px 20px 40px; color: var(--muted); font-size: 12px; }}
@@ -445,6 +527,13 @@ _DOCUMENT = """<!doctype html>
 </header>
 {alarm}
 <main>{panels}</main>
+<section class="wide">
+  <h2>How it is holding up</h2>
+  <p class="meta">Hit Rate by the day a Round settled, with the number of Paper Trades
+     behind it. A lifetime average stays healthy for a long time after an edge has closed;
+     a row of recent days does not. Days below the {break_even} break-even are dimmed.</p>
+  {periods}
+</section>
 <section class="wide">
   <h2>Recent Rounds</h2>
   <p class="meta">Settled Rounds, newest first, so the scoring can be checked against
