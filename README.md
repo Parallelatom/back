@@ -143,6 +143,11 @@ See [live VPS setup and recovery](docs/execution.md#live-setup-on-vps). Defaults
 first run to one 1-USDC position per wallet. API mint has no verified atomic minimum-output
 protection; live config requires acknowledging that limitation.
 
+Live quotes must now exceed 1.30 shares per 1 USDC. An explicit `--until` or
+`--overnight-hours` session supports a bounded overnight run (10 USDC total, 10 attempts,
+2 USDC loss stop, one open position) with restart-safe deadlines. See
+[overnight commands and comparison report](docs/execution.md#overnight-test-with-shares--130).
+
 An optional forward paper runner now rehearses Delta Edge → buy receipt → settlement →
 redeem receipt, with separate 10 USD ledgers for BTC and XYZCL and a 1 USD stake. It is
 disabled by default and cannot send real transactions. It does not run during deployment.

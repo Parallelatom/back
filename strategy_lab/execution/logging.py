@@ -45,6 +45,10 @@ def explain(reason, market):
         "outside Trade Window": "อยู่นอกช่วงซื้อ (live เหลือ 300–75s)",
         "new entries disabled": "ปิดซื้อใหม่ / มีไฟล์ HALT",
         "configured lifetime trade count reached": "ครบจำนวนรอบทดลอง — ยังติดตามสถานะ/claim ต่อ",
+        "overnight entry deadline reached": "ครบเวลาค้างคืน — หยุดซื้อใหม่ แต่ยังติดตาม/claim ต่อ",
+        "overnight trade limit reached": "ครบ 10 ครั้งของค้างคืนนี้ — ยังติดตาม/claim ต่อ",
+        "overnight spend limit reached": "ครบวงเงินซื้อ 10 USDC ของค้างคืนนี้ — ยังติดตาม/claim ต่อ",
+        "overnight loss limit reached": "ถึงขีดจำกัดขาดทุน 2 USDC ของค้างคืนนี้ — ยังติดตาม/claim ต่อ",
         "already recorded": "รอบนี้บันทึกคำสั่งแล้ว — ไม่ส่งซื้อซ้ำ",
         "no live Round recorded": "รอข้อมูลรอบจาก Collector",
         "recordings unavailable": "อ่านข้อมูล Collector ไม่ได้ — ไม่ส่งซื้อใหม่",
@@ -67,6 +71,8 @@ class LiveLog:
         self.last_at = None
         self.positions = {}
         self.round = None
+        self.session_key = None
+        self.floor = None
 
     def preflight(self, result, execute):
         if self.format == "json":
@@ -89,6 +95,16 @@ class LiveLog:
             self.emit(json.dumps({"logged_at": now, **report}))
             return
         prefix = f"[{clock(now, self.timezone)}]"
+        floor = report.get("min_quote_shares_micro")
+        if floor and self.floor != floor:
+            self.emit(f"{prefix} BUY FILTER | 1 USDC ต้องได้ quote > {floor/1e6:.6f} shares (เท่ากันก็ข้าม) | API ไม่รับประกันขั้นต่ำตอน fill")
+            self.floor = floor
+        session = report.get("overnight")
+        session_key = json.dumps(session, sort_keys=True)
+        if session and self.session_key != session_key:
+            end = datetime.fromtimestamp(session["ends_at"], self.timezone).strftime("%Y-%m-%d %H:%M:%S")
+            self.emit(f"{prefix} OVERNIGHT | หยุดซื้อ {end} | ครั้ง {session['attempts']}/10 | ใช้/กันไว้ {session['committed_micro']/1e6:.2f}/10.00 USDC | ขาดทุน {session['loss_micro']/1e6:.2f}/2.00 | หลังครบเวลายัง claim ต่อ")
+            self.session_key = session_key
         if market:
             if self.round != market["round_end"]:
                 self.emit(f"{prefix} ROUND {market['symbol']} | {clock(market['round_start'], self.timezone)}–{clock(market['round_end'], self.timezone)} | เกณฑ์ |Delta| > {market['threshold_pct']:.2f}%")

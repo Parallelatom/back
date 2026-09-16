@@ -5,6 +5,7 @@
     "BTC": {
       "enabled": false,
       "max_trades": 1,
+      "min_quote_shares_micro": 1300000,
       "accept_unprotected_slippage": false,
       "claim_gas_cap_wei": 100000000000000,
       "address": "",
@@ -15,6 +16,7 @@
     "XYZCL": {
       "enabled": false,
       "max_trades": 1,
+      "min_quote_shares_micro": 1300000,
       "accept_unprotected_slippage": false,
       "claim_gas_cap_wei": 100000000000000,
       "address": "",

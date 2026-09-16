@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 import tempfile
 import time
+from datetime import datetime
 
 from ..db import connect_readonly
 from .accounts import address, read_profiles
@@ -27,6 +28,10 @@ def main():
     parser.add_argument("--halt-file", required=True, help="stops entries, keeps claims running")
     parser.add_argument("--execute", action="store_true", help="allow real buys and signed claims")
     parser.add_argument("--watch", action="store_true")
+    deadline = parser.add_mutually_exclusive_group()
+    deadline.add_argument("--overnight-hours", type=int, choices=range(1, 13), metavar="1..12",
+                        help="start/resume a durable overnight session (10 USDC, 10 attempts, 2 USDC loss stop)")
+    deadline.add_argument("--until", help="stop new entries at ISO date/time WITH offset, e.g. 2026-09-17T09:00:00+07:00")
     parser.add_argument("--log-format", choices=("text", "json"), default="text")
     parser.add_argument("--log-timezone", default="Asia/Bangkok")
     parser.add_argument("--log-interval", type=float, default=5, help="heartbeat seconds; new prices/states print immediately")
@@ -65,6 +70,18 @@ def main():
         if not args.execute:
             return
         stage = "live execution/recovery"
+        if (args.overnight_hours is not None or args.until is not None) and not settings.enabled:
+            raise SetupError("OVERNIGHT_DISABLED: enable the selected Symbol before starting the timed session")
+        if args.overnight_hours is not None:
+            broker.start_overnight(args.overnight_hours)
+        if args.until is not None:
+            try:
+                stop_at = datetime.fromisoformat(args.until)
+                if stop_at.utcoffset() is None:
+                    raise ValueError()
+            except ValueError:
+                raise SetupError("OVERNIGHT_UNTIL: supply ISO date/time with a timezone offset") from None
+            broker.start_until(int(stop_at.timestamp()))
         if args.attach_buy:
             broker.attach_buy(*args.attach_buy)
         if args.retry_claim:
@@ -100,6 +117,7 @@ def main():
                 "SELECT position_id,operation,tx_hash FROM live_ops ORDER BY position_id,operation")]
             logged_at = int(time.time())
             log.report({"reason": reason, "claim_gas_wei": gas,
+                        "overnight": broker.overnight_status(), "min_quote_shares_micro": settings.min_quote_shares_micro,
                         "cash_excludes_eth_gas": True, "market": market_status(snapshot, logged_at, settings),
                         "transactions": transactions, **summary}, logged_at)
             if not args.watch:

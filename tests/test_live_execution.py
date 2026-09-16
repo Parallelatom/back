@@ -264,12 +264,12 @@ def test_live_delta_uses_chain_quote_when_reserve_record_is_old_or_missing(rig, 
     def view(target, signature, *args, **kwargs):
         if signature == "quoteC0E17FC7(bytes8,uint256)":
             quoted.append(True)
-            return (1200000, 17000, 0)
+            return (1320000, 17000, 0)
         return original(target, signature, *args, **kwargs)
     monkeypatch.setattr(rig.rpc, "view", view)
     assert Executor(rig.settings, rig.ledger, rig.broker).enter(snapshot, NOW) == "BUY_PENDING"
     assert quoted == [True] and len(rig.posts) == 1
-    assert rig.ledger.positions()[0]["quoted_shares"] == 1200000
+    assert rig.ledger.positions()[0]["quoted_shares"] == 1320000
 
 
 @pytest.mark.parametrize("kind", ["fails", "zero", "stale"])
@@ -380,3 +380,109 @@ def test_default_cli_does_not_enter_or_advance(rig, monkeypatch, tmp_path, capsy
     output = capsys.readouterr().out
     assert '"execute": false' in output and "test-only-authorization" not in output
     assert not rig.posts and not rig.rpc.broadcasts
+
+
+@pytest.mark.parametrize("shares,accepted", [(1299999, False), (1300000, False), (1300001, True)])
+def test_share_threshold_is_strictly_greater_than_1_30(rig, monkeypatch, shares, accepted):
+    from strategy_lab.execution.paper import Quote
+    monkeypatch.setattr(rig.broker, "quote", lambda *a: Quote(shares, NOW))
+    reason = Executor(rig.settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
+    assert bool(rig.posts) is accepted
+    if accepted:
+        assert rig.ledger.positions()[0]["minimum_shares"] >= 1300001
+    else:
+        assert "must be > 1.300000" in reason
+        assert not rig.ledger.positions()
+
+
+def add_closed(rig, index, now, lost=False):
+    intent = {"id": f"test-{index}", "symbol": "BTC", "ending": END + index * 900,
+              "pool": POOL, "outcome": UP, "side": "UP", "strategy": "Delta Edge", "amount": 1000000,
+              "minimum_shares": 1300001, "quoted_shares": 1314422}
+    assert rig.ledger.reserve(intent, rig.settings, now) == "reserved"
+    rig.ledger.transition(intent["id"], "BUY_READY", "LOST" if lost else "REDEEMED", now,
+                          cost=1000000, payout=0 if lost else 1314422, shares=1314422)
+
+
+def test_overnight_counts_new_attempts_and_persists_across_restart(rig, monkeypatch):
+    add_closed(rig, 0, NOW - 10)
+    assert rig.broker.entry_block() == "configured lifetime trade count reached"
+    first = rig.broker.start_overnight(8)
+    assert first["attempts"] == 0 and rig.broker.entry_block() is None
+    add_closed(rig, 1, NOW)
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: NOW + 3600)
+    other = Ledger(rig.path, rig.settings)
+    try:
+        broker = LiveBroker(other, rig.profile, "BTC", rig.rpc, rig.account)
+        resumed = broker.start_overnight(8)
+        assert resumed["ends_at"] == first["ends_at"] and resumed["attempts"] == 1
+        assert resumed["committed_micro"] == 1000000
+        with pytest.raises(ValueError, match="OVERNIGHT_EXISTS"):
+            broker.start_until(first["ends_at"] + 3600)
+    finally:
+        other.close()
+
+
+def test_overnight_total_budget_does_not_reset_at_utc_midnight(rig, monkeypatch):
+    midnight = (NOW // 86400 + 1) * 86400
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: midnight - 3600)
+    rig.broker.start_overnight(8)
+    for i in range(10):
+        at = midnight - 1 if i < 5 else midnight + 1
+        monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: at)
+        assert rig.broker.entry_block() is None
+        add_closed(rig, i, at)
+    assert rig.broker.overnight_status()["committed_micro"] == 10000000
+    assert rig.broker.entry_block() == "overnight trade limit reached"
+
+
+def test_overnight_loss_stop_does_not_reset_at_midnight(rig, monkeypatch):
+    midnight = (NOW // 86400 + 1) * 86400
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: midnight - 3600)
+    rig.broker.start_overnight(8)
+    add_closed(rig, 0, midnight - 1, lost=True)
+    add_closed(rig, 1, midnight + 1, lost=True)
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: midnight + 1)
+    assert rig.broker.entry_block() == "overnight loss limit reached"
+
+
+def test_deadline_stops_entries_but_claims_existing_position(rig, monkeypatch):
+    session = rig.broker.start_until(NOW + 3600)
+    engine, identity = buy(rig)
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: session["ends_at"])
+    assert rig.broker.entry_block() == "overnight entry deadline reached"
+    rig.rpc.winner = bytes.fromhex(UP[2:])
+    engine.advance(session["ends_at"], rig.broker.settlement)
+    assert len(rig.rpc.broadcasts) == 1
+    assert rig.ledger.get(identity)["state"] == "REDEEM_PENDING"
+    assert rig.broker.start_until(session["ends_at"])["ends_at"] == session["ends_at"]
+
+
+def test_deadline_during_presubmit_rpc_releases_unsent_reservation(rig, monkeypatch):
+    clock = [NOW]
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: clock[0])
+    rig.broker.start_until(NOW + 4)
+    original = rig.broker.mapping
+    calls = []
+    def mapping(*args):
+        calls.append(True)
+        if len(calls) == 2: clock[0] = NOW + 4
+        return original(*args)
+    monkeypatch.setattr(rig.broker, "mapping", mapping)
+    result = Executor(rig.settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
+    assert result == "EXPIRED" and not rig.posts
+    assert rig.ledger.summary(rig.settings)["reserved_usd"] == 0
+
+
+def test_compare_pairs_paper_and_live_without_calling_pending_a_loss(rig, monkeypatch):
+    from strategy_lab.execution import compare
+    from strategy_lab.replay import PaperTrade
+    rig.broker.start_overnight(8)
+    Executor(rig.settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
+    paper = PaperTrade(END, NOW, "UP", 1314422, .5, .76, True, .314422)
+    monkeypatch.setattr(compare, "replay", lambda *a, **k: {"Delta Edge": SimpleNamespace(trades=[paper])})
+    report = compare.compare(rig.ledger.conn, None, "BTC")
+    assert report["rows"][0]["same_side"] is True
+    assert report["rows"][0]["live_realized_pnl_usdc"] is None
+    assert report["paper_pnl_usdc"] == .314422
+    assert report["live_closed"] == 0

@@ -7,6 +7,65 @@ while developing or testing this adapter; the live end-to-end tests use a mock s
 
 ## Live setup on VPS
 
+### Overnight test with shares > 1.30
+
+Live entries now require **strictly more than 1.300000 quoted shares for 1 USDC**.
+Exactly 1.300000 is rejected. `min_quote_shares_micro` defaults to `1300000` even in existing
+local configs, so copying over a populated config is unnecessary. Paper/dashboard logic is
+unchanged. The position records the stricter of this floor (+1 raw share unit) and the
+existing 1% quote tolerance. An actual fill below that stored minimum is still accounted
+and claimed, but persistently stops future buys. The API cannot atomically enforce minimum
+output, so quote success is not a guaranteed fill price.
+
+Stop the old live runner with Ctrl-C before starting the timed one, using the SAME ledger.
+For the requested run ending **2026-09-17 09:00 Asia/Bangkok**:
+
+```sh
+git pull --ff-only origin main
+bash run-live.sh XYZCL --execute --watch --until '2026-09-17T09:00:00+07:00'
+```
+
+To survive an SSH disconnect, run it under `nohup` instead (do not start both commands):
+
+```sh
+nohup bash run-live.sh XYZCL --execute --watch --until '2026-09-17T09:00:00+07:00' >> data/XYZCL-night.log 2>&1 &
+tail -f data/XYZCL-night.log
+```
+
+Ctrl-C exits `tail`, not the background bot. Creating `data/HALT-XYZCL` stops new entries
+while reconciliation and claims continue. Never delete the ledger. The Collector and
+dashboard remain running as before. The selected profile must already be enabled and have
+slippage acknowledgement; the command does not edit credentials or config.
+
+`--until` requires a timezone offset and a new deadline within the next 24 hours. Alternatively,
+`--overnight-hours 8` starts an eight-hour run. Timed mode overrides the old lifetime
+`max_trades: 1` with **up to 10 new intents, at most 10 USDC total committed buy spend,
+and a 2 USDC gross realized-loss stop for this session**, per wallet. Daily limits remain
+as additional restrictions. A completed earlier trial is excluded from the timed session;
+an outstanding earlier position must still finish before another can open. Only one position
+is open at a time. Finality delays, skips and limits mean far fewer than 10 trades may occur.
+Gas is separate from the USDC budget; every claim still has its configured gas ceiling.
+
+Session baseline, start and deadline are durable. Neither restart nor UTC midnight resets
+the totals or extends the deadline. Restart with the original command, or omit the timed flag
+to resume the saved session. A different deadline is refused. After the deadline, new buys
+stop but the process keeps reconciling and claiming pending positions. There is no automatic
+second night or budget reset. Unknown transactions remain reserved and are never resent.
+
+At 09:00, compare with the original dashboard's **Delta Edge** model:
+
+```sh
+.venv/bin/python -m strategy_lab.execution.compare --symbol XYZCL --csv data/XYZCL-night-comparison.csv
+```
+
+The read-only report pairs by Round, showing sides, actual/model shares, state, realized
+USDC PnL and separately confirmed claim gas in ETH. The CSV also includes entry times and
+whether the paper model's shares would exceed 1.30. The dashboard baseline keeps its normal
+quality filters and has NO share-floor filter, gas cost, live finality waits or one-position
+limit. It is a model comparison, not an expectation of equal profits. Missing/pending values
+are `--`, not losses or zero payouts. Later reruns update pending outcomes. These commands
+do not change the existing forward dashboard or send trades themselves.
+
 Use Python 3.9+ and a dedicated EOA for each Symbol. The claim private key must derive the
 same public address as that Symbol's configured wallet. API Authorization must belong to
 that wallet; preflight can validate the signer but cannot prove API credential ownership

@@ -16,7 +16,7 @@ from eth_utils import keccak, to_checksum_address
 from .accounts import (CLAIMANT, ENDPOINT, USDC, ZERO, address, claim_transaction,
                        hex_value, inspect_receipt, mint_hash, mint_payload)
 from .config import Settings
-from .errors import SetupError
+from .errors import SetupError, NotSubmitted
 from .paper import Quote, Receipt
 
 
@@ -68,7 +68,10 @@ def settings_from_profile(profile, symbol, wallet):
                         wallet_label=wallet, strategy="Delta Edge", stake=1_000_000,
                         bankroll=10_000_000, max_open_positions=1, max_exposure=10_000_000,
                         daily_spend=10_000_000, daily_loss=2_000_000)
-    return SimpleNamespace(**{**settings.__dict__, "mode": "live"})
+    floor = profile.get("min_quote_shares_micro", 1_300_000)
+    if type(floor) is not int or not 1_300_000 <= floor <= 100_000_000:
+        raise SetupError("CONFIG_SHARE_FLOOR: min_quote_shares_micro must be an integer >= 1300000")
+    return SimpleNamespace(**{**settings.__dict__, "mode": "live", "min_quote_shares_micro": floor})
 
 
 class LiveBroker:
@@ -105,7 +108,47 @@ class LiveBroker:
                 share_token TEXT NOT NULL, outcome_up TEXT, outcome_down TEXT,
                 gas_wei INTEGER, PRIMARY KEY(position_id,operation));
             CREATE TABLE IF NOT EXISTS live_flags (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS overnight_session (
+                id INTEGER PRIMARY KEY CHECK(id=1), started_at INTEGER NOT NULL,
+                ends_at INTEGER NOT NULL, baseline_ids TEXT NOT NULL);
         """)
+
+    def start_overnight(self, hours):
+        if type(hours) is not int or not 1 <= hours <= 12:
+            raise SetupError("OVERNIGHT_HOURS: use an integer from 1 to 12")
+        session = self.overnight_status()
+        if session:
+            if session["ends_at"] - session["started_at"] != hours * 3600:
+                raise SetupError("OVERNIGHT_EXISTS: resume with the original duration; deadline cannot be extended")
+            return session
+        return self.start_until(int(time.time()) + hours * 3600)
+
+    def start_until(self, ends_at):
+        session = self.overnight_status()
+        if session:
+            if session["ends_at"] != ends_at:
+                raise SetupError("OVERNIGHT_EXISTS: resume the saved deadline; it cannot be extended")
+            return session
+        now = int(time.time())
+        if type(ends_at) is not int or not now < ends_at <= now + 24 * 3600:
+            raise SetupError("OVERNIGHT_UNTIL: new deadline must be in the next 24 hours")
+        # A restart resumes the original session; it can never extend its deadline.
+        with self.ledger.conn:
+            self.ledger.conn.execute("INSERT OR IGNORE INTO overnight_session VALUES (1,?,?,?)",
+                (now, ends_at, json.dumps([p["id"] for p in self.ledger.positions()])))
+        return self.overnight_status()
+
+    def overnight_status(self, exclude_id=None):
+        row = self.ledger.conn.execute("SELECT * FROM overnight_session WHERE id=1").fetchone()
+        if not row:
+            return None
+        baseline = set(json.loads(row["baseline_ids"]))
+        positions = [p for p in self.ledger.positions() if p["id"] not in baseline and p["id"] != exclude_id]
+        spent = sum(p["amount"] for p in positions if p["state"] not in ("EXPIRED", "BUY_REJECTED"))
+        loss = sum(max(0, p["cost"] - p["payout"]) for p in positions if p["state"] in ("LOST", "REDEEMED"))
+        return {"started_at": row["started_at"], "ends_at": row["ends_at"],
+                "attempts": len(positions), "max_trades": 10, "committed_micro": spent,
+                "budget_micro": 10_000_000, "loss_micro": loss, "loss_limit_micro": 2_000_000}
 
     def preflight(self):
         if self.rpc.call("eth_chainId", []) != "0xa4b1":
@@ -135,11 +178,22 @@ class LiveBroker:
         with self.ledger.conn:
             self.ledger.conn.execute("INSERT OR REPLACE INTO live_flags VALUES ('halt',?)", (reason,))
 
-    def entry_block(self):
+    def entry_block(self, exclude_id=None):
         row = self.ledger.conn.execute("SELECT value FROM live_flags WHERE name='halt'").fetchone()
         if row:
             return row[0]
-        if len(self.ledger.positions()) >= self.max_trades:
+        session = self.overnight_status(exclude_id)
+        if session:
+            if time.time() >= session["ends_at"]:
+                return "overnight entry deadline reached"
+            if session["attempts"] >= session["max_trades"]:
+                return "overnight trade limit reached"
+            if session["committed_micro"] + 1_000_000 > session["budget_micro"]:
+                return "overnight spend limit reached"
+            if session["loss_micro"] >= session["loss_limit_micro"]:
+                return "overnight loss limit reached"
+            return None
+        if len([p for p in self.ledger.positions() if p["id"] != exclude_id]) >= self.max_trades:
             return "configured lifetime trade count reached"
         return None
 
@@ -178,13 +232,18 @@ class LiveBroker:
     def submit_buy(self, position, snapshot):
         if self.op(position, "buy"):
             return  # a prior attempt exists, including an unknown acknowledgement
-        if self.profile.get("enabled") is not True or self.entry_block() not in (None, "configured lifetime trade count reached"):
-            raise ValueError("live entries disabled")
-        if len(self.ledger.positions()) > self.max_trades:
-            raise ValueError("trade count exceeded")
+        if self.profile.get("enabled") is not True or self.entry_block(exclude_id=position["id"]):
+            raise NotSubmitted("live entries disabled or limit reached before sending")
+        floor = self.profile.get("min_quote_shares_micro", 1_300_000)
+        if position["quoted_shares"] <= floor:
+            raise NotSubmitted("quote is not above share minimum")
         if position["ending"] - time.time() < 75:
-            raise ValueError("too near cutoff")
+            raise NotSubmitted("too near cutoff")
         share = self.mapping(position["pool"], position["outcome"])
+        if self.entry_block(exclude_id=position["id"]):
+            raise NotSubmitted("entry limit reached during pre-submit reads")
+        if position["ending"] - time.time() < 75 or time.time() - position["created_at"] > 5:
+            raise NotSubmitted("buy timing expired before submission")
         payload = mint_payload(position["pool"], position["outcome"], int(time.time() * 1000))
         # Durable marker before HTTP. No transport retry and no redirect with credentials.
         with self.ledger.conn:

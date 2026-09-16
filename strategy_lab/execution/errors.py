@@ -3,3 +3,7 @@
 
 class SetupError(ValueError):
     pass
+
+
+class NotSubmitted(ValueError):
+    """A buy was refused before any API request; safe to release its reservation."""

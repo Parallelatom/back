@@ -9,6 +9,7 @@ import time
 
 from .paper import Quote, Receipt
 from .signals import decide
+from .errors import NotSubmitted
 
 
 class Executor:
@@ -45,11 +46,15 @@ class Executor:
         if (not isinstance(quote, Quote) or type(quote.shares) is not int or quote.shares <= 0
                 or not 0 <= now - quote.observed_at <= self.settings.max_age_seconds):
             return "invalid or stale quote"
+        floor = getattr(self.settings, "min_quote_shares_micro", 0) if self.settings.mode == "live" else 0
+        if floor and quote.shares <= floor:
+            return f"quote shares {quote.shares / 1e6:.6f} must be > {floor / 1e6:.6f} per 1 USDC"
         intent = {
             "id": identity, "symbol": snapshot.record.symbol, "ending": snapshot.record.ending,
             "pool": snapshot.pool, "outcome": snapshot.outcome_up if entry.side == "UP" else snapshot.outcome_down,
             "side": entry.side, "strategy": self.settings.strategy, "amount": self.settings.stake,
-            "minimum_shares": (quote.shares * (10_000 - self.settings.slippage_bps) + 9_999) // 10_000,
+            "minimum_shares": max(floor + 1 if floor else 0,
+                                  (quote.shares * (10_000 - self.settings.slippage_bps) + 9_999) // 10_000),
             "quoted_shares": quote.shares,
         }
         reason = self.ledger.reserve(intent, self.settings, now)
@@ -58,6 +63,9 @@ class Executor:
         if self.ledger.transition(identity, "BUY_READY", "BUY_PENDING", now):
             try:
                 self.broker.submit_buy(self.ledger.get(identity), snapshot)
+            except NotSubmitted:
+                self.ledger.transition(identity, "BUY_PENDING", "EXPIRED", int(time.time()),
+                                       error="buy cancelled before submission; no API request sent")
             except Exception as exc:
                 self._unknown(identity, "BUY_PENDING", now, exc)
         return self.ledger.get(identity)["state"]
