@@ -1,0 +1,334 @@
+"""Accounts API buy + locally signed Arbitrum payoff, with durable at-most-once intent.
+
+Only the explicit live CLI constructs this adapter. HTTP acknowledgements never credit
+cash. Unknown API submissions block the Round until an operator attaches a proven hash.
+"""
+import json
+import os
+import time
+from types import SimpleNamespace
+
+import requests
+from eth_abi import decode, encode
+from eth_account import Account
+from eth_utils import keccak, to_checksum_address
+
+from .accounts import (CLAIMANT, ENDPOINT, USDC, ZERO, address, claim_transaction,
+                       hex_value, inspect_receipt, mint_hash, mint_payload)
+from .config import Settings
+from .paper import Quote, Receipt
+
+
+def calldata(signature, types=(), values=()):
+    return "0x" + (keccak(text=signature)[:4] + encode(types, values)).hex()
+
+
+class RPC:
+    def __init__(self, url="https://arb1.arbitrum.io/rpc"):
+        if not url.startswith("https://"):
+            raise ValueError("RPC must use HTTPS")
+        self.url = url
+
+    def call(self, method, params):
+        try:
+            r = requests.post(self.url, json={"jsonrpc": "2.0", "id": 1,
+                              "method": method, "params": params}, timeout=20,
+                              headers={"User-Agent": "strategy-lab/1.0"}, allow_redirects=False)
+            if r.status_code != 200:
+                raise ValueError()
+            reply = r.json()
+            if reply.get("error") or "result" not in reply:
+                raise ValueError()
+            return reply["result"]
+        except (requests.RequestException, ValueError):
+            raise ValueError("RPC request failed; reconcile before retry") from None
+
+    def view(self, target, signature, inputs=(), values=(), outputs=("uint256",), block="latest"):
+        raw = self.call("eth_call", [{"to": address(target),
+                         "data": calldata(signature, inputs, values)}, block])
+        return decode(outputs, bytes.fromhex(raw[2:]))
+
+    def finalized(self, tx_hash):
+        receipt = self.call("eth_getTransactionReceipt", [hex_value(tx_hash, 32)])
+        if receipt is None:
+            return None
+        canonical = self.call("eth_getBlockByNumber", [receipt["blockNumber"], False])
+        final = self.call("eth_getBlockByNumber", ["finalized", False])
+        if (not canonical or not final or canonical["hash"] != receipt["blockHash"]
+                or int(final["number"], 16) < int(receipt["blockNumber"], 16)):
+            return None
+        receipt["_canonical_timestamp"] = int(canonical["timestamp"], 16)
+        return receipt
+
+
+def settings_from_profile(profile, symbol, wallet):
+    # Reuse the strict paper risk-value validation, then explicitly select live mode.
+    settings = Settings(enabled=profile.get("enabled", False), symbols=(symbol,),
+                        wallet_label=wallet, strategy="Delta Edge", stake=1_000_000,
+                        bankroll=10_000_000, max_open_positions=1, max_exposure=10_000_000,
+                        daily_spend=10_000_000, daily_loss=2_000_000)
+    return SimpleNamespace(**{**settings.__dict__, "mode": "live"})
+
+
+class LiveBroker:
+    simulated = False
+
+    def __init__(self, ledger, profile, symbol, rpc=None, account=None):
+        self.ledger, self.profile = ledger, profile
+        self.wallet = address(profile["address"])
+        self.rpc = rpc or RPC()
+        self.account = account or Account.from_key(os.environ.get("NINELIVES_" + symbol + "_PRIVATE_KEY", ""))
+        if self.account.address.lower() != self.wallet:
+            raise ValueError("claim signing key does not match configured wallet")
+        self.auth = os.environ.get(profile["authorization_env"], "")
+        if not self.auth.strip() or any(c in self.auth for c in "\r\n"):
+            raise ValueError("Authorization is missing or invalid")
+        self.max_trades = profile.get("max_trades", 1)
+        self.gas_cap = profile.get("claim_gas_cap_wei", 100_000_000_000_000)
+        if type(self.max_trades) is not int or not 1 <= self.max_trades <= 10:
+            raise ValueError("max_trades must be 1..10 per ledger")
+        if type(self.gas_cap) is not int or not 0 < self.gas_cap <= 10**15:
+            raise ValueError("claim gas cap must be positive and at most 0.001 ETH")
+        ledger.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS live_ops (
+                position_id TEXT NOT NULL, operation TEXT NOT NULL,
+                request TEXT NOT NULL, tx_hash TEXT UNIQUE, raw_tx TEXT,
+                share_token TEXT NOT NULL, outcome_up TEXT, outcome_down TEXT,
+                gas_wei INTEGER, PRIMARY KEY(position_id,operation));
+            CREATE TABLE IF NOT EXISTS live_flags (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """)
+
+    def preflight(self):
+        if self.rpc.call("eth_chainId", []) != "0xa4b1":
+            raise ValueError("wrong chain")
+        for contract in (USDC, CLAIMANT):
+            if self.rpc.call("eth_getCode", [contract, "latest"]) == "0x":
+                raise ValueError("required contract missing")
+        if self.rpc.call("eth_getCode", [self.wallet, "latest"]) != "0x":
+            raise ValueError("this signer supports EOA wallets only")
+        if self.rpc.view(USDC, "decimals()", outputs=("uint8",))[0] != 6:
+            raise ValueError("wrong token decimals")
+        return {"wallet": self.wallet, "chain_id": 42161,
+                "usdc_micro": self.balance(USDC),
+                "eth_wei": int(self.rpc.call("eth_getBalance", [self.wallet, "latest"]), 16),
+                "authorization_present": True, "signer_matches": True,
+                "api_authentication_verified": False}
+
+    def balance(self, token):
+        return self.rpc.view(token, "balanceOf(address)", ("address",), (self.wallet,))[0]
+
+    def op(self, position, operation):
+        row = self.ledger.conn.execute("SELECT * FROM live_ops WHERE position_id=? AND operation=?",
+                                       (position["id"], operation)).fetchone()
+        return dict(row) if row else None
+
+    def stop(self, reason):
+        with self.ledger.conn:
+            self.ledger.conn.execute("INSERT OR REPLACE INTO live_flags VALUES ('halt',?)", (reason,))
+
+    def entry_block(self):
+        row = self.ledger.conn.execute("SELECT value FROM live_flags WHERE name='halt'").fetchone()
+        if row:
+            return row[0]
+        if len(self.ledger.positions()) >= self.max_trades:
+            return "configured lifetime trade count reached"
+        return None
+
+    def mapping(self, pool, outcome, block="latest"):
+        return address(self.rpc.view(pool, "shareAddr(bytes8)", ("bytes8",),
+                       (bytes.fromhex(hex_value(outcome, 8)[2:]),), ("address",), block)[0])
+
+    def quote(self, snapshot, side, amount):
+        if self.entry_block():
+            raise ValueError("live entries halted")
+        if amount != 1_000_000 or self.balance(USDC) < amount:
+            raise ValueError("insufficient USDC or wrong stake")
+        if int(self.rpc.call("eth_getBalance", [self.wallet, "latest"]), 16) < self.gas_cap:
+            raise ValueError("fund claim gas before buying")
+        if self.profile.get("accept_unprotected_slippage") is not True:
+            raise ValueError("Accounts mint has no verified minimum output; acknowledge in config")
+        pool = address(snapshot.pool)
+        if self.rpc.view(pool, "timeEnding()")[0] != snapshot.record.ending:
+            raise ValueError("pool expiry does not match Round")
+        if snapshot.record.ending - time.time() < 75:
+            raise ValueError("too near buy cutoff")
+        if self.rpc.view(pool, "isDppm()", outputs=("bool",))[0]:
+            raise ValueError("DPPM pools are not supported by this binary executor")
+        outcomes = self.rpc.view(pool, "outcomeList()", outputs=("bytes8[]",))[0]
+        expected = {hex_value(snapshot.outcome_up, 8), hex_value(snapshot.outcome_down, 8)}
+        if len(outcomes) != 2 or {"0x" + o.hex() for o in outcomes} != expected or len(expected) != 2:
+            raise ValueError("pool outcomes do not match Round")
+        outcome = snapshot.outcome_up if side == "UP" else snapshot.outcome_down
+        share = self.mapping(pool, outcome)
+        if self.balance(share):
+            raise ValueError("pool already has shares; use a dedicated wallet")
+        shares = self.rpc.view(pool, "quoteC0E17FC7(bytes8,uint256)", ("bytes8", "uint256"),
+                     (bytes.fromhex(outcome[2:]), amount), ("uint256", "uint256", "uint256"))[0]
+        return Quote(shares, int(time.time()))
+
+    def submit_buy(self, position, snapshot):
+        if self.op(position, "buy"):
+            return  # a prior attempt exists, including an unknown acknowledgement
+        if self.profile.get("enabled") is not True or self.entry_block() not in (None, "configured lifetime trade count reached"):
+            raise ValueError("live entries disabled")
+        if len(self.ledger.positions()) > self.max_trades:
+            raise ValueError("trade count exceeded")
+        if position["ending"] - time.time() < 75:
+            raise ValueError("too near cutoff")
+        share = self.mapping(position["pool"], position["outcome"])
+        payload = mint_payload(position["pool"], position["outcome"], int(time.time() * 1000))
+        # Durable marker before HTTP. No transport retry and no redirect with credentials.
+        with self.ledger.conn:
+            self.ledger.conn.execute("INSERT INTO live_ops(position_id,operation,request,share_token,outcome_up,outcome_down) VALUES (?,'buy',?,?,?,?)",
+                (position["id"], json.dumps(payload), share, hex_value(snapshot.outcome_up, 8), hex_value(snapshot.outcome_down, 8)))
+        try:
+            response = requests.post(ENDPOINT, json=payload, headers={"Authorization": self.auth,
+                "Content-Type": "application/json", "Origin": "https://www.9lives.so",
+                "Referer": "https://www.9lives.so/"}, timeout=20, allow_redirects=False)
+            if response.status_code != 200:
+                raise ValueError()
+            tx = mint_hash(response.json())
+        except (requests.RequestException, ValueError):
+            raise ValueError("buy acknowledgement unknown; do not resend") from None
+        with self.ledger.conn:
+            self.ledger.conn.execute("UPDATE live_ops SET tx_hash=? WHERE position_id=? AND operation='buy'",
+                                     (tx, position["id"]))
+
+    def lookup_buy(self, position):
+        return self._receipt(position, "buy")
+
+    def settlement(self, position, now):
+        op = self.op(position, "buy")
+        winner = self.rpc.view(position["pool"], "details(bytes8)", ("bytes8",),
+                    (bytes.fromhex(position["outcome"][2:]),),
+                    ("uint256", "uint256", "uint256", "bytes8"), "finalized")[3]
+        winner = "0x" + winner.hex()
+        if winner == op["outcome_up"]:
+            return "UP"
+        if winner == op["outcome_down"]:
+            return "DOWN"
+        return None
+
+    def submit_redeem(self, position):
+        if self.op(position, "redeem"):
+            return
+        buy = self.op(position, "buy")
+        if self.settlement(position, int(time.time())) != position["side"]:
+            raise ValueError("not a finalized winning position")
+        if self.balance(buy["share_token"]) != position["shares"]:
+            raise ValueError("share balance changed; reconcile manual/automatic claim")
+        unsigned = claim_transaction(self.wallet, position["pool"])
+        simulation = self.rpc.call("eth_call", [unsigned, "latest"])
+        payouts = decode(("uint256[]",), bytes.fromhex(simulation[2:]))[0]
+        if len(payouts) != 1 or payouts[0] <= 0:
+            raise ValueError("claim simulation returns no payout")
+        gas = (int(self.rpc.call("eth_estimateGas", [unsigned]), 16) * 120 + 99) // 100
+        gas_price = int(self.rpc.call("eth_gasPrice", []), 16) * 2
+        if gas_price <= 0 or gas <= 0 or gas * gas_price > self.gas_cap:
+            raise ValueError("claim exceeds gas cap")
+        if int(self.rpc.call("eth_getBalance", [self.wallet, "latest"]), 16) < gas * gas_price:
+            raise ValueError("insufficient ETH")
+        nonce = int(self.rpc.call("eth_getTransactionCount", [self.wallet, "pending"]), 16)
+        latest = int(self.rpc.call("eth_getTransactionCount", [self.wallet, "latest"]), 16)
+        if nonce != latest:
+            raise ValueError("wallet already has pending transactions")
+        tx = {"chainId": 42161, "to": to_checksum_address(CLAIMANT), "value": 0,
+              "data": unsigned["data"], "nonce": nonce, "gas": gas, "gasPrice": gas_price}
+        signed = self.account.sign_transaction(tx)
+        tx_hash, raw = "0x" + signed.hash.hex(), "0x" + signed.raw_transaction.hex()
+        # Persist signed hash/bytes BEFORE broadcasting. A crash never signs a new nonce.
+        with self.ledger.conn:
+            self.ledger.conn.execute("INSERT INTO live_ops(position_id,operation,request,share_token,tx_hash,raw_tx) VALUES (?,'redeem',?,?,?,?)",
+                                    (position["id"], json.dumps(tx), buy["share_token"], tx_hash, raw))
+        returned = self.rpc.call("eth_sendRawTransaction", [raw])
+        if hex_value(returned, 32) != tx_hash:
+            raise ValueError("unexpected broadcast hash; reconcile persisted transaction")
+
+    def lookup_redeem(self, position):
+        return self._receipt(position, "redeem")
+
+    def _receipt(self, position, operation, candidate=None):
+        op = candidate or self.op(position, operation)
+        if not op or not op["tx_hash"]:
+            return None
+        r = self.rpc.finalized(op["tx_hash"])
+        if r is None:
+            return None
+        if hex_value(r["transactionHash"], 32) != op["tx_hash"]:
+            raise ValueError("wrong receipt")
+        timestamp = r["_canonical_timestamp"]
+        if timestamp < position["created_at"] - 5:
+            raise ValueError("receipt predates this intent")
+        if operation == "buy" and timestamp > position["ending"]:
+            raise ValueError("buy receipt belongs to an expired Round")
+        if r["status"] == "0x0":
+            self.stop("transaction reverted; inspect before further trading")
+            return Receipt(False, 0, 0, op["tx_hash"])
+        if self.mapping(position["pool"], position["outcome"], r["blockNumber"]) != op["share_token"]:
+            raise ValueError("share mapping changed")
+        report = inspect_receipt(r, op["tx_hash"], self.wallet, position["pool"], op["share_token"],
+                                 "buy" if operation == "buy" else "claim")
+        # Bind pool event to the exact outcome and recipient as well as token transfers.
+        signature = ("SharesMinted(bytes8,uint256,address,address,uint256)" if operation == "buy"
+                     else "PayoffActivated(bytes8,uint256,address,address,uint256)")
+        if operation == "buy":
+            matches = [log for log in r["logs"] if log["address"].lower() == position["pool"].lower()
+                and len(log["topics"]) == 4 and log["topics"][0].lower() == "0x" + keccak(text=signature).hex()
+                and log["topics"][1].lower() == "0x" + position["outcome"][2:].lower().ljust(64, "0")]
+            if len(matches) != 1:
+                raise ValueError("no matching SharesMinted event")
+            recipient, spent = decode(("address", "uint256"), bytes.fromhex(matches[0]["data"][2:]))
+            if recipient.lower() != self.wallet or int(matches[0]["topics"][2], 16) != report["shares_minted_raw"]:
+                raise ValueError("mint event recipient/shares mismatch")
+        with self.ledger.conn:
+            self.ledger.conn.execute("UPDATE live_ops SET gas_wei=? WHERE position_id=? AND operation=?",
+                                     (report["gas_wei"], position["id"], operation))
+        shares = report["shares_minted_raw" if operation == "buy" else "shares_burned_raw"]
+        amount = report["usdc_out_micro" if operation == "buy" else "usdc_in_micro"]
+        if operation == "buy" and shares < position["minimum_shares"]:
+            self.stop("actual fill below quoted minimum; acquired shares still reconciled")
+        if operation == "redeem" and shares != position["shares"]:
+            raise ValueError("claim burned a different position size")
+        return Receipt(True, shares, amount, op["tx_hash"])
+
+    def attach_buy(self, identity, tx_hash):
+        position = self.ledger.get(identity)
+        if not position or position["state"] != "BUY_PENDING":
+            raise ValueError("expected a pending buy")
+        op = self.op(position, "buy")
+        if not op or op["tx_hash"]:
+            raise ValueError("only an unknown API acknowledgement can be attached")
+        tx_hash = hex_value(tx_hash, 32)
+        if self.ledger.conn.execute("SELECT 1 FROM live_ops WHERE tx_hash=?", (tx_hash,)).fetchone():
+            raise ValueError("hash already used")
+        receipt = self._receipt(position, "buy", {**op, "tx_hash": tx_hash})
+        if receipt is None or not receipt.success:
+            raise ValueError("hash must prove a finalized matching purchase")
+        with self.ledger.conn:
+            self.ledger.conn.execute("UPDATE live_ops SET tx_hash=? WHERE position_id=? AND operation='buy' AND tx_hash IS NULL",
+                                    (tx_hash, identity))
+
+    def retry_claim(self, identity):
+        position = self.ledger.get(identity)
+        if not position or position["state"] != "REDEEM_PENDING":
+            raise ValueError("expected a pending claim")
+        op = self.op(position, "redeem")
+        if op:
+            if not op["raw_tx"]:
+                raise ValueError("missing signed transaction")
+            # Same bytes, same nonce, same hash. Never sign a replacement here.
+            returned = self.rpc.call("eth_sendRawTransaction", [op["raw_tx"]])
+            if hex_value(returned, 32) != op["tx_hash"]:
+                raise ValueError("broadcast hash mismatch")
+        else:
+            # No live_ops record proves submit_redeem never reached broadcasting.
+            self.ledger.transition(identity, "REDEEM_PENDING", "REDEEM_READY", int(time.time()), error=None)
+
+    def valid_receipt(self, receipt, operation, position):
+        op = self.op(position, "buy" if operation == "buy" else "redeem")
+        if not isinstance(receipt, Receipt) or not op or receipt.reference != op["tx_hash"]:
+            return False
+        if not receipt.success:
+            return receipt.shares == receipt.amount == 0
+        return receipt.shares > 0 and (receipt.amount == position["amount"] if operation == "buy"
+                    else receipt.shares == position["shares"] and receipt.amount > 0)

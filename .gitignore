@@ -7,6 +7,10 @@ __pycache__/
 .venv/
 .DS_Store
 .env
+execution-btc.json
+execution-xyzcl.json
+execution-accounts.json
+execution-secrets.env
 .agents/
 .claude/
 .scratch/

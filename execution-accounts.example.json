@@ -1,0 +1,26 @@
+{
+  "chain_id": 42161,
+  "accounts_url": "https://arb-accounts.superposition.so/",
+  "wallets": {
+    "BTC": {
+      "enabled": false,
+      "max_trades": 1,
+      "accept_unprotected_slippage": false,
+      "claim_gas_cap_wei": 100000000000000,
+      "address": "",
+      "authorization_env": "NINELIVES_BTC_AUTHORIZATION",
+      "stake_micro": 1000000,
+      "budget_micro": 10000000
+    },
+    "XYZCL": {
+      "enabled": false,
+      "max_trades": 1,
+      "accept_unprotected_slippage": false,
+      "claim_gas_cap_wei": 100000000000000,
+      "address": "",
+      "authorization_env": "NINELIVES_XYZCL_AUTHORIZATION",
+      "stake_micro": 1000000,
+      "budget_micro": 10000000
+    }
+  }
+}

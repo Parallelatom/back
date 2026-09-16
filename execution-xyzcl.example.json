@@ -1,0 +1,16 @@
+{
+  "enabled": false,
+  "mode": "paper",
+  "wallet_label": "xyzcl-paper",
+  "strategy": "Delta Edge",
+  "symbols": ["XYZCL"],
+  "stake_usd": "1",
+  "bankroll_usd": "10",
+  "max_open_positions": 1,
+  "max_exposure_usd": "10",
+  "daily_spend_usd": "10",
+  "daily_loss_usd": "2",
+  "slippage_bps": 100,
+  "max_age_seconds": 15,
+  "max_signal_age_seconds": 5
+}

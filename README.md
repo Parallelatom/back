@@ -132,3 +132,25 @@ Tests that talk to the live exchange are skipped unless you ask for them:
 ```sh
 STRATEGY_LAB_LIVE=1 .venv/bin/python -m pytest
 ```
+
+## Preparing an execution loop
+
+Live Accounts API buying and locally signed claims are available through the separate
+`run-live.sh` / `strategy_lab.execution.run_live` entry point. Default deployment does not
+trade. Fill public wallet addresses and local Authorization/private-key fields, run
+read-only preflight, then explicitly enable the selected profile and pass `--execute`.
+See [live VPS setup and recovery](docs/execution.md#live-setup-on-vps). Defaults limit the
+first run to one 1-USDC position per wallet. API mint has no verified atomic minimum-output
+protection; live config requires acknowledging that limitation.
+
+An optional forward paper runner now rehearses Delta Edge → buy receipt → settlement →
+redeem receipt, with separate 10 USD ledgers for BTC and XYZCL and a 1 USD stake. It is
+disabled by default and cannot send real transactions. It does not run during deployment.
+
+```sh
+.venv/bin/python -m strategy_lab.execution --demo
+```
+
+See [execution preparation](docs/execution.md) for the two example configurations, recovery
+behavior, integration evidence, and live activation steps. The existing dashboard continues
+to show retrospective Paper Trades; live positions are reported by the separate runner.

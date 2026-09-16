@@ -1,0 +1,12 @@
+.git
+.venv
+data
+.env
+execution-secrets.env
+execution-accounts.json
+execution-btc.json
+execution-xyzcl.json
+**/__pycache__
+.agents
+.claude
+.scratch
