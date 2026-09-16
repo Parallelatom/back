@@ -56,7 +56,7 @@ def explain(reason, market):
         "Oracle Stale at decision time": "ราคาของรอบยังไม่มีการเปลี่ยนแปลง",
         "signal expired while fetching live quote": "สัญญาณหมดอายุระหว่างอ่าน quote — ไม่ส่งซื้อ",
         "BUY_PENDING": "ส่งซื้อแล้ว/รอตรวจสอบผล — ยังไม่ยืนยันว่าได้ shares",
-        "open-position limit": "มีรายการค้างอยู่ — รอปิดรายการเดิม",
+        "open-position limit": "มีออร์เดอร์ค้าง — รอยืนยันซื้อ/ผลรอบ/claim ก่อนซื้อเพิ่ม",
     }.get(reason, reason)
 
 

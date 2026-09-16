@@ -49,6 +49,16 @@ class RPC:
                          "data": calldata(signature, inputs, values)}, block])
         return decode(outputs, bytes.fromhex(raw[2:]))
 
+    def mined(self, tx_hash):
+        receipt = self.call("eth_getTransactionReceipt", [hex_value(tx_hash, 32)])
+        if receipt is None:
+            return None
+        block = self.call("eth_getBlockByNumber", [receipt["blockNumber"], False])
+        if not block or block["hash"] != receipt["blockHash"]:
+            return None
+        receipt["_canonical_timestamp"] = int(block["timestamp"], 16)
+        return receipt
+
     def finalized(self, tx_hash):
         receipt = self.call("eth_getTransactionReceipt", [hex_value(tx_hash, 32)])
         if receipt is None:
@@ -267,11 +277,20 @@ class LiveBroker:
         return self._receipt(position, "buy")
 
     def settlement(self, position, now):
+        if now < position["ending"] + 300:
+            return None
         op = self.op(position, "buy")
         winner = self.rpc.view(position["pool"], "details(bytes8)", ("bytes8",),
                     (bytes.fromhex(position["outcome"][2:]),),
-                    ("uint256", "uint256", "uint256", "bytes8"), "finalized")[3]
+                    ("uint256", "uint256", "uint256", "bytes8"), "latest")[3]
         winner = "0x" + winner.hex()
+        # Winning shares can be claimed on latest; only finalize a loss once final.
+        if winner in (op["outcome_up"], op["outcome_down"]) and winner != position["outcome"]:
+            final = self.rpc.view(position["pool"], "details(bytes8)", ("bytes8",),
+                (bytes.fromhex(position["outcome"][2:]),),
+                ("uint256", "uint256", "uint256", "bytes8"), "finalized")[3]
+            if "0x" + final.hex() != winner:
+                return None
         if winner == op["outcome_up"]:
             return "UP"
         if winner == op["outcome_down"]:
@@ -283,7 +302,7 @@ class LiveBroker:
             return
         buy = self.op(position, "buy")
         if self.settlement(position, int(time.time())) != position["side"]:
-            raise ValueError("not a finalized winning position")
+            raise ValueError("claim delay not elapsed or latest winner not confirmed")
         if self.balance(buy["share_token"]) != position["shares"]:
             raise ValueError("share balance changed; reconcile manual/automatic claim")
         unsigned = claim_transaction(self.wallet, position["pool"])
@@ -324,6 +343,11 @@ class LiveBroker:
         if not op or not op["tx_hash"]:
             return None
         r = self.rpc.finalized(op["tx_hash"])
+        # Permit recovery into OPEN for claiming after the delay even if L1 finality
+        # lags. Cash remains spent; claim proceeds are still credited only at finality.
+        if (r is None and operation == "buy" and candidate is None
+                and time.time() >= position["ending"] + 300):
+            r = self.rpc.mined(op["tx_hash"])
         if r is None:
             return None
         if hex_value(r["transactionHash"], 32) != op["tx_hash"]:

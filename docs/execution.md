@@ -381,3 +381,14 @@ Live Delta Edge allows up to 15 seconds from its first signal, including quote R
 chasing a later signal. Oracle and metadata must remain at most 15 seconds old after
 quote reads and before submission; the separate 5-second intent-to-submit limit and
 75-second Round cutoff remain. Dashboard paper results do not include this RPC delay.
+
+Claim policy: start checking at Round end + 300 seconds. Read the winner from `latest`;
+if unresolved, keep polling. A winning position must pass the existing share-balance,
+positive payout simulation, gas and nonce checks before one persisted signed transaction
+is broadcast. If buy finality is still pending after this delay, a canonical mined receipt
+with the same transfer/event validation may establish the position for claiming. This
+accepts pre-finality chain risk for claim submission; loss classification and claim payout
+credit still require finalized chain evidence. The one-open-position limit therefore still
+blocks new buys until claim finality. Restart preserves existing signed claims and never
+signs them again. Simulation/gas/nonce failures before signing remain pending for inspection
+and explicit retry; unresolved winners alone are polled automatically.

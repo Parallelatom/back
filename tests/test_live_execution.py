@@ -1,5 +1,6 @@
 """No real network: real signing with a throwaway test key, fake Accounts and RPC."""
 import json
+from unittest.mock import patch
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -130,7 +131,8 @@ def test_full_live_loop_signs_persists_then_reconciles_after_restart(rig):
     assert rig.posts[0][1]["allow_redirects"] is False
     assert rig.ledger.summary(rig.settings)["cash_usd"] == 9
     rig.rpc.winner = bytes.fromhex(UP[2:])
-    engine.advance(END, rig.broker.settlement)
+    with patch("strategy_lab.execution.live.time.time", return_value=END + 300):
+        engine.advance(END + 300, rig.broker.settlement)
     p = rig.ledger.get(identity)
     op = rig.broker.op(p, "redeem")
     assert p["state"] == "REDEEM_PENDING"
@@ -175,7 +177,8 @@ def test_claim_timeout_does_not_sign_again_and_explicit_retry_uses_same_bytes(ri
     engine, identity = buy(rig)
     rig.rpc.winner = bytes.fromhex(UP[2:])
     rig.rpc.lose_ack = True
-    engine.advance(END, rig.broker.settlement)
+    with patch("strategy_lab.execution.live.time.time", return_value=END + 300):
+        engine.advance(END + 300, rig.broker.settlement)
     engine.advance(END + 1, rig.broker.settlement)
     assert len(rig.rpc.broadcasts) == 1
     rig.rpc.lose_ack = False
@@ -187,7 +190,8 @@ def test_claim_timeout_does_not_sign_again_and_explicit_retry_uses_same_bytes(ri
 def test_losing_round_does_not_claim(rig):
     engine, identity = buy(rig)
     rig.rpc.winner = bytes.fromhex(DOWN[2:])
-    engine.advance(END, rig.broker.settlement)
+    with patch("strategy_lab.execution.live.time.time", return_value=END + 300):
+        engine.advance(END + 300, rig.broker.settlement)
     assert rig.ledger.get(identity)["state"] == "LOST"
     assert rig.rpc.broadcasts == []
 
@@ -209,7 +213,8 @@ def test_claim_prebroadcast_failures_never_send_and_can_be_retried(rig, fault):
     if fault == "nonce": rig.rpc.pending_nonce = 1
     if fault == "gas": rig.rpc.gas_price = 10**15
     if fault == "balance": rig.rpc.shares = 0
-    engine.advance(END, rig.broker.settlement)
+    with patch("strategy_lab.execution.live.time.time", return_value=END + 300):
+        engine.advance(END + 300, rig.broker.settlement)
     assert rig.rpc.broadcasts == []
     assert rig.broker.op(rig.ledger.get(identity), "redeem") is None
     rig.broker.retry_claim(identity)
@@ -364,7 +369,8 @@ def test_claim_signed_hash_is_already_durable_when_broadcast_called(rig, monkeyp
                 independent.close()
         return original(method, params)
     monkeypatch.setattr(rig.rpc, "call", call)
-    engine.advance(END, rig.broker.settlement)
+    with patch("strategy_lab.execution.live.time.time", return_value=END + 300):
+        engine.advance(END + 300, rig.broker.settlement)
     assert rig.broker.op(rig.ledger.get(identity), "redeem") is not None
 
 
@@ -505,3 +511,44 @@ def test_compare_pairs_paper_and_live_without_calling_pending_a_loss(rig, monkey
     assert report["rows"][0]["live_realized_pnl_usdc"] is None
     assert report["paper_pnl_usdc"] == .314422
     assert report["live_closed"] == 0
+
+
+def test_claim_waits_five_minutes_and_retries_unresolved_winner(rig, monkeypatch):
+    engine, identity = buy(rig)
+    rig.rpc.winner = bytes.fromhex(UP[2:])
+    monkeypatch.setattr('strategy_lab.execution.live.time.time', lambda: END + 299)
+    engine.advance(END + 299, rig.broker.settlement)
+    assert not rig.rpc.broadcasts
+    rig.rpc.winner = bytes(8)
+    monkeypatch.setattr('strategy_lab.execution.live.time.time', lambda: END + 300)
+    engine.advance(END + 300, rig.broker.settlement)
+    assert rig.ledger.get(identity)['state'] == 'OPEN'
+    rig.rpc.winner = bytes.fromhex(UP[2:])
+    engine.advance(END + 300, rig.broker.settlement)
+    engine.advance(END + 301, rig.broker.settlement)
+    assert len(rig.rpc.broadcasts) == 1
+
+
+def test_claim_uses_latest_with_unfinalized_buy_but_does_not_credit_unfinalized_payout(rig, monkeypatch):
+    engine = Executor(rig.settings, rig.ledger, rig.broker)
+    engine.enter(rig.snapshot, NOW)
+    identity = rig.ledger.positions()[0]['id']
+    mined = receipt(rig.broker.wallet, BUY_HASH, 'buy')
+    monkeypatch.setattr(rig.rpc, 'mined', lambda tx: mined, raising=False)
+    rig.rpc.shares = 1314422
+    original = rig.rpc.view
+    def view(target, signature, inputs=(), values=(), outputs=(), block='latest'):
+        if signature == 'details(bytes8)':
+            return (0, 0, 0, bytes.fromhex(UP[2:]) if block == 'latest' else bytes(8))
+        return original(target, signature, inputs, values, outputs, block)
+    monkeypatch.setattr(rig.rpc, 'view', view)
+    monkeypatch.setattr('strategy_lab.execution.live.time.time', lambda: END + 299)
+    engine.advance(END + 299, rig.broker.settlement)
+    assert rig.ledger.get(identity)['state'] == 'BUY_PENDING'
+    monkeypatch.setattr('strategy_lab.execution.live.time.time', lambda: END + 300)
+    engine.advance(END + 300, rig.broker.settlement)
+    assert rig.ledger.get(identity)['state'] == 'REDEEM_PENDING'
+    assert len(rig.rpc.broadcasts) == 1
+    assert rig.ledger.get(identity)['payout'] == 0
+    engine.advance(END + 301, rig.broker.settlement)
+    assert len(rig.rpc.broadcasts) == 1
