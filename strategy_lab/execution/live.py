@@ -59,17 +59,6 @@ class RPC:
         receipt["_canonical_timestamp"] = int(block["timestamp"], 16)
         return receipt
 
-    def finalized(self, tx_hash):
-        receipt = self.call("eth_getTransactionReceipt", [hex_value(tx_hash, 32)])
-        if receipt is None:
-            return None
-        canonical = self.call("eth_getBlockByNumber", [receipt["blockNumber"], False])
-        final = self.call("eth_getBlockByNumber", ["finalized", False])
-        if (not canonical or not final or canonical["hash"] != receipt["blockHash"]
-                or int(final["number"], 16) < int(receipt["blockNumber"], 16)):
-            return None
-        receipt["_canonical_timestamp"] = int(canonical["timestamp"], 16)
-        return receipt
 
 
 def settings_from_profile(profile, symbol, wallet):
@@ -284,13 +273,6 @@ class LiveBroker:
                     (bytes.fromhex(position["outcome"][2:]),),
                     ("uint256", "uint256", "uint256", "bytes8"), "latest")[3]
         winner = "0x" + winner.hex()
-        # Winning shares can be claimed on latest; only finalize a loss once final.
-        if winner in (op["outcome_up"], op["outcome_down"]) and winner != position["outcome"]:
-            final = self.rpc.view(position["pool"], "details(bytes8)", ("bytes8",),
-                (bytes.fromhex(position["outcome"][2:]),),
-                ("uint256", "uint256", "uint256", "bytes8"), "finalized")[3]
-            if "0x" + final.hex() != winner:
-                return None
         if winner == op["outcome_up"]:
             return "UP"
         if winner == op["outcome_down"]:
@@ -342,12 +324,7 @@ class LiveBroker:
         op = candidate or self.op(position, operation)
         if not op or not op["tx_hash"]:
             return None
-        r = self.rpc.finalized(op["tx_hash"])
-        # Permit recovery into OPEN for claiming after the delay even if L1 finality
-        # lags. Cash remains spent; claim proceeds are still credited only at finality.
-        if (r is None and operation == "buy" and candidate is None
-                and time.time() >= position["ending"] + 300):
-            r = self.rpc.mined(op["tx_hash"])
+        r = self.rpc.mined(op["tx_hash"])
         if r is None:
             return None
         if hex_value(r["transactionHash"], 32) != op["tx_hash"]:
@@ -399,7 +376,7 @@ class LiveBroker:
             raise ValueError("hash already used")
         receipt = self._receipt(position, "buy", {**op, "tx_hash": tx_hash})
         if receipt is None or not receipt.success:
-            raise ValueError("hash must prove a finalized matching purchase")
+            raise ValueError("hash must prove a canonical mined matching purchase")
         with self.ledger.conn:
             self.ledger.conn.execute("UPDATE live_ops SET tx_hash=? WHERE position_id=? AND operation='buy' AND tx_hash IS NULL",
                                     (tx_hash, identity))

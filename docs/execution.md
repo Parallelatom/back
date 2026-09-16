@@ -45,7 +45,7 @@ bankroll**. A **2 USDC gross realized-loss stop** persists for the whole session
 loss limit also remains. Cash, live wallet balance, and exposure checks still apply. A
 completed earlier trial is excluded from session loss totals; an outstanding earlier
 position must still finish before another can open. Only one position is open at a time.
-Finality delays, skips, insufficient funds or the loss stop can prevent trades before 09:00.
+Receipt delays, skips, insufficient funds or the loss stop can prevent trades before 09:00.
 Existing saved timed sessions adopt this policy on upgrade without resetting their deadline
 or loss history. Untimed trials and paper runners retain their existing spend/count limits.
 Gas is separate from the USDC budget; every claim still has its configured gas ceiling.
@@ -65,7 +65,7 @@ At 09:00, compare with the original dashboard's **Delta Edge** model:
 The read-only report pairs by Round, showing sides, actual/model shares, state, realized
 USDC PnL and separately confirmed claim gas in ETH. The CSV also includes entry times and
 whether the paper model's shares would exceed 1.30. The dashboard baseline keeps its normal
-quality filters and has NO share-floor filter, gas cost, live finality waits or one-position
+quality filters and has NO share-floor filter, gas cost, live receipt waits or one-position
 limit. It is a model comparison, not an expectation of equal profits. Missing/pending values
 are `--`, not losses or zero payouts. Later reruns update pending outcomes. These commands
 do not change the existing forward dashboard or send trades themselves.
@@ -198,7 +198,7 @@ parallel local runners, but cannot protect against another machine using the sam
 
 Buy HTTP requests are attempted once, with no redirects or automatic retries. HTTP errors,
 GraphQL errors or a lost response leave `BUY_PENDING` and reserve funds. A returned hash
-still needs a canonical finalized receipt proving the pool/outcome, wallet USDC debit and
+still needs a canonical mined receipt proving the pool/outcome, wallet USDC debit and
 share mint. API success alone does not debit the ledger. If the response hash was lost,
 find the actual transaction on the explorer, then attach it (no new buy is sent):
 
@@ -206,10 +206,10 @@ find the actual transaction on the explorer, then attach it (no new buy is sent)
 bash run-live.sh XYZCL --execute --attach-buy POSITION_ID TX_HASH
 ```
 
-Only a successful finalized matching purchase is accepted. If no matching hash is known,
+Only a successful canonical mined matching purchase is accepted. If no matching hash is known,
 leave the position pending; never guess that timeout means no purchase happened.
 
-Settlement uses finalized on-chain `details(bytes8)`, not an inferred oracle result.
+Settlement uses latest on-chain `details(bytes8)`, not an inferred oracle result.
 Winning shares are claimed through `payoff(address[])` for one pool. Before signing, the
 runner checks exact share balance, simulated payout, estimated gas ceiling, ETH balance and
 pending nonce. Signed bytes and hash are committed before broadcasting. A missing response
@@ -228,7 +228,7 @@ externally auto-claimed positions cause a balance mismatch and stay blocked for 
 this build does not silently credit external payouts. A replaced/dropped transaction also
 remains pending; automatic fee replacement is intentionally not implemented.
 
-Finality may substantially lag inclusion. While waiting, money stays reserved and no second
+Receipt inclusion/validation can lag submission. While waiting, money stays reserved and no second
 position is opened. The runner reports claim gas separately in wei; cash/PnL in USDC exclude
 ETH gas. A persistent below-quote or reverted-transaction halt is recorded in `live_flags`;
 there is no automatic clearing. Existing positions still reconcile. The dashboard still
@@ -385,10 +385,11 @@ quote reads and before submission; the separate 5-second intent-to-submit limit 
 Claim policy: start checking at Round end + 300 seconds. Read the winner from `latest`;
 if unresolved, keep polling. A winning position must pass the existing share-balance,
 positive payout simulation, gas and nonce checks before one persisted signed transaction
-is broadcast. If buy finality is still pending after this delay, a canonical mined receipt
-with the same transfer/event validation may establish the position for claiming. This
-accepts pre-finality chain risk for claim submission; loss classification and claim payout
-credit still require finalized chain evidence. The one-open-position limit therefore still
-blocks new buys until claim finality. Restart preserves existing signed claims and never
+is broadcast. Buy and claim receipts are checked against the current canonical block and
+validated transfers/events, without waiting for `finalized`. A valid successful claim
+credits its payout and releases the open-position slot. Losses use the latest on-chain
+winner too. This accepts pre-finality reorg risk: credited receipts/results could later
+change, and this runner does not automatically roll back terminal ledger entries on a
+later reorg. Restart preserves existing signed claims and never
 signs them again. Simulation/gas/nonce failures before signing remain pending for inspection
 and explicit retry; unresolved winners alone are polled automatically.

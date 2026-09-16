@@ -83,7 +83,7 @@ class FakeRPC:
             return "0x" + keccak(bytes.fromhex(params[0][2:])).hex()
         raise AssertionError(method)
 
-    def finalized(self, tx):
+    def mined(self, tx):
         return self.receipts.get(tx)
 
 
@@ -529,12 +529,12 @@ def test_claim_waits_five_minutes_and_retries_unresolved_winner(rig, monkeypatch
     assert len(rig.rpc.broadcasts) == 1
 
 
-def test_claim_uses_latest_with_unfinalized_buy_but_does_not_credit_unfinalized_payout(rig, monkeypatch):
+def test_claim_latest_receipt_unlocks_without_finality(rig, monkeypatch):
     engine = Executor(rig.settings, rig.ledger, rig.broker)
     engine.enter(rig.snapshot, NOW)
     identity = rig.ledger.positions()[0]['id']
     mined = receipt(rig.broker.wallet, BUY_HASH, 'buy')
-    monkeypatch.setattr(rig.rpc, 'mined', lambda tx: mined, raising=False)
+    rig.rpc.receipts[BUY_HASH] = mined
     rig.rpc.shares = 1314422
     original = rig.rpc.view
     def view(target, signature, inputs=(), values=(), outputs=(), block='latest'):
@@ -544,7 +544,7 @@ def test_claim_uses_latest_with_unfinalized_buy_but_does_not_credit_unfinalized_
     monkeypatch.setattr(rig.rpc, 'view', view)
     monkeypatch.setattr('strategy_lab.execution.live.time.time', lambda: END + 299)
     engine.advance(END + 299, rig.broker.settlement)
-    assert rig.ledger.get(identity)['state'] == 'BUY_PENDING'
+    assert rig.ledger.get(identity)['state'] == 'OPEN'
     monkeypatch.setattr('strategy_lab.execution.live.time.time', lambda: END + 300)
     engine.advance(END + 300, rig.broker.settlement)
     assert rig.ledger.get(identity)['state'] == 'REDEEM_PENDING'
@@ -552,3 +552,28 @@ def test_claim_uses_latest_with_unfinalized_buy_but_does_not_credit_unfinalized_
     assert rig.ledger.get(identity)['payout'] == 0
     engine.advance(END + 301, rig.broker.settlement)
     assert len(rig.rpc.broadcasts) == 1
+
+    claim = rig.broker.op(rig.ledger.get(identity), 'redeem')
+    rig.rpc.receipts[claim['tx_hash']] = receipt(rig.broker.wallet, claim['tx_hash'], 'claim')
+    engine.advance(END + 302, rig.broker.settlement)
+    assert rig.ledger.get(identity)['state'] == 'REDEEMED'
+    assert rig.ledger.get(identity)['payout'] == 1314422
+    assert not rig.ledger.active()
+    assert len(rig.rpc.broadcasts) == 1
+
+
+@pytest.mark.parametrize('canonical', [True, False])
+def test_mined_receipt_checks_canonical_block_without_finality(monkeypatch, canonical):
+    from strategy_lab.execution.live import RPC
+    rpc = RPC()
+    def call(method, params):
+        if method == 'eth_getTransactionReceipt':
+            return {'blockNumber': '0x100', 'blockHash': '0xabc'}
+        assert method == 'eth_getBlockByNumber' and params == ['0x100', False]
+        return {'hash': '0xabc' if canonical else '0xdef', 'timestamp': hex(NOW)}
+    monkeypatch.setattr(rpc, 'call', call)
+    result = rpc.mined(BUY_HASH)
+    if canonical:
+        assert result['_canonical_timestamp'] == NOW
+    else:
+        assert result is None
