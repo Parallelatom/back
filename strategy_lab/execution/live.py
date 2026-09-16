@@ -67,7 +67,7 @@ def settings_from_profile(profile, symbol, wallet):
     settings = Settings(enabled=profile.get("enabled", False), symbols=(symbol,),
                         wallet_label=wallet, strategy="Delta Edge", stake=1_000_000,
                         bankroll=10_000_000, max_open_positions=1, max_exposure=10_000_000,
-                        daily_spend=10_000_000, daily_loss=2_000_000)
+                        daily_spend=10_000_000, daily_loss=2_000_000, max_signal_age_seconds=15)
     floor = profile.get("min_quote_shares_micro", 1_300_000)
     if type(floor) is not int or not 1_300_000 <= floor <= 100_000_000:
         raise SetupError("CONFIG_SHARE_FLOOR: min_quote_shares_micro must be an integer >= 1300000")
@@ -240,6 +240,11 @@ class LiveBroker:
             raise NotSubmitted("entry limit reached during pre-submit reads")
         if position["ending"] - time.time() < 75 or time.time() - position["created_at"] > 5:
             raise NotSubmitted("buy timing expired before submission")
+        # Do not let pre-submit RPC latency outlive the observed oracle/metadata.
+        if (time.time() - snapshot.metadata_at > 15
+                or not snapshot.record.prices
+                or time.time() - snapshot.record.prices[-1][0] > 15):
+            raise NotSubmitted("market observations expired before submission")
         payload = mint_payload(position["pool"], position["outcome"], int(time.time() * 1000))
         # Durable marker before HTTP. No transport retry and no redirect with credentials.
         with self.ledger.conn:

@@ -375,3 +375,9 @@ Claimant Helper `0xf8Da8d65120b317331C79092Bf65e99bed6e65dE`, selector `0xeaca3a
 The live implementation is `strategy_lab/execution/live.py`; use the setup and recovery
 commands at the top of this document. The older `execution.prepare` CLI remains an offline
 request builder/read-only receipt inspector; it does not enable or replace the live runner.
+
+Live Delta Edge allows up to 15 seconds from its first signal, including quote RPC time
+(paper runner retains 5 seconds). It still skips the Round after expiry rather than
+chasing a later signal. Oracle and metadata must remain at most 15 seconds old after
+quote reads and before submission; the separate 5-second intent-to-submit limit and
+75-second Round cutoff remain. Dashboard paper results do not include this RPC delay.

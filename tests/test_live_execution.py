@@ -297,7 +297,7 @@ def test_live_reserve_change_preserves_signal_guards(rig, kind):
     elif kind == "stale-metadata":
         snapshot = replace(snapshot, metadata_at=START)
     else:
-        now += 6
+        now += 16
     Executor(rig.settings, rig.ledger, rig.broker).enter(snapshot, now)
     assert not rig.posts and not rig.ledger.positions()
 
@@ -332,17 +332,21 @@ def test_old_receipt_cannot_be_attached_to_current_intent(rig, monkeypatch):
     assert rig.broker.op(p, "buy")["tx_hash"] is None
 
 
-def test_delayed_quote_expires_signal_without_sending(rig, monkeypatch):
+@pytest.mark.parametrize("delay", [6, 15, 16])
+def test_delayed_quote_respects_live_signal_budget(rig, monkeypatch, delay):
     clock = [NOW]
     original = rig.broker.quote
     def delayed(*args):
         q = original(*args)
-        clock[0] += 6
+        clock[0] += delay
         return q
     monkeypatch.setattr(rig.broker, "quote", delayed)
     monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: clock[0])
     result = Executor(rig.settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
-    assert "signal expired" in result and rig.posts == []
+    if delay <= 15:
+        assert result == "BUY_PENDING" and len(rig.posts) == 1
+    else:
+        assert "signal expired" in result and rig.posts == []
 
 
 def test_claim_signed_hash_is_already_durable_when_broadcast_called(rig, monkeypatch):

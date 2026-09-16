@@ -43,6 +43,9 @@ class Executor:
             now = int(time.time())
             if now - entry.at > self.settings.max_signal_age_seconds:
                 return "signal expired while fetching live quote"
+            if (now - snapshot.metadata_at > self.settings.max_age_seconds
+                    or now - snapshot.record.prices[-1][0] > self.settings.max_age_seconds):
+                return "market observations expired while fetching live quote"
         if (not isinstance(quote, Quote) or type(quote.shares) is not int or quote.shares <= 0
                 or not 0 <= now - quote.observed_at <= self.settings.max_age_seconds):
             return "invalid or stale quote"
