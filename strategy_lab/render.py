@@ -28,6 +28,8 @@ RECENT_ROUNDS = 50
 
 COLOURS = {
     "Delta Edge": "#2563eb",
+    "Lock Rider": "#0891b2",
+    "Contrarian Fill": "#ea580c",
     "Always Up": "#16a34a",
     "Always Down": "#dc2626",
     "Flip Follow": "#9333ea",

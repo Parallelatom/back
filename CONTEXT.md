@@ -127,6 +127,14 @@ Strategy 4.2 in the original brief.
 Enters `DOWN` on every Round with no condition. A baseline, not a belief.
 Strategy 4.3 in the original brief.
 
+**Lock Rider**:
+Backs whichever Side is ahead at the last moment the contract still allows a buy, with no
+minimum distance, refusing only when the pool has already made that Side dear.
+
+**Contrarian Fill**:
+Buys the Side the price favours while the pool is still selling it cheaply, which happens
+when earlier buyers took the other Side or the Round turned after they bought.
+
 **Flip Follow**:
 Enters when Delta changes sign during the Trade Window and both sides of the crossing hold
 for three seconds, taking the Side that Delta flipped to. Requiring the old side to have
