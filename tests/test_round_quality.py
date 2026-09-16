@@ -253,6 +253,22 @@ class TestRepairingRoundsJudgedWithoutEvidence:
     Rounds that are now perfectly good.
     """
 
+    def test_reconnect_repairs_a_round_with_some_previously_recorded_prices(self, ingest):
+        a_round(ingest)
+        series(ingest, T0, T0 + 300, lambda ts: 100.0)
+        ingest.finalise_closed_rounds(T0 + GRID + 1)
+        assert row(ingest)["partial"] == 1
+        assert row(ingest)["tick_count"] == 61
+
+        series(ingest, T0 + 305, T0 + GRID, lambda ts: 101.0)
+        assert ingest.finalise_closed_rounds(T0 + GRID + 1) == 1
+        assert row(ingest)["partial"] == 0
+        assert row(ingest)["oracle_stale"] == 0
+        assert row(ingest)["tick_count"] == 181
+        # Repeated snapshots do not dirty a summary without any new evidence.
+        series(ingest, T0 + 305, T0 + GRID, lambda ts: 101.0)
+        assert ingest.finalise_closed_rounds(T0 + GRID + 1) == 0
+
     def test_a_round_summarised_with_no_prices_is_judged_again_once_they_arrive(self, ingest):
         a_round(ingest)
         ingest.finalise_closed_rounds(now=T0 + GRID + 1)

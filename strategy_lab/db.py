@@ -11,6 +11,7 @@ collected (ADR-0002).
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 BUSY_TIMEOUT_MS = 10_000
 
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS rounds (
     code_version         TEXT    NOT NULL,
     PRIMARY KEY (symbol, ending)
 );
+CREATE INDEX IF NOT EXISTS rounds_by_pool ON rounds (LOWER(pool_address));
 
 -- The complete oracle series, kept whole. Which Round a price falls inside is a question
 -- answered at read time by joining to `rounds`, never a reason to discard the price: the
@@ -53,6 +55,26 @@ CREATE TABLE IF NOT EXISTS oracle_prices (
     PRIMARY KEY (symbol, ts)
 );
 
+-- Work waiting to be reconstructed, not a second copy of the observations. Keeping this
+-- in the same transaction as a new price makes restart recovery incremental too.
+CREATE TABLE IF NOT EXISTS reconstruction_pending (
+    symbol   TEXT PRIMARY KEY,
+    first_ts INTEGER NOT NULL,
+    last_ts  INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS new_price_needs_replay AFTER INSERT ON oracle_prices
+BEGIN
+    INSERT INTO reconstruction_pending (symbol, first_ts, last_ts)
+    VALUES (NEW.symbol, NEW.ts, NEW.ts)
+    ON CONFLICT (symbol) DO UPDATE SET
+        first_ts = MIN(first_ts, excluded.first_ts),
+        last_ts = MAX(last_ts, excluded.last_ts);
+    UPDATE rounds SET distinct_price_count = NULL
+     WHERE symbol = NEW.symbol AND ending BETWEEN NEW.ts AND NEW.ts + 900
+       AND COALESCE(starting, ending - 900) <= NEW.ts
+       AND distinct_price_count IS NOT NULL;
+END;
+
 CREATE TABLE IF NOT EXISTS reserves (
     pool_address TEXT    NOT NULL,
     ts           INTEGER NOT NULL,
@@ -64,6 +86,7 @@ CREATE TABLE IF NOT EXISTS reserves (
     code_version TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS reserves_by_round ON reserves (symbol, round_ending, ts);
+CREATE INDEX IF NOT EXISTS reserves_by_pool ON reserves (LOWER(pool_address));
 
 CREATE TABLE IF NOT EXISTS delta_flips (
     symbol        TEXT    NOT NULL,
@@ -121,5 +144,39 @@ def connect(path: str) -> sqlite3.Connection:
 
 
 def initialise(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA)
-    conn.commit()
+    upgrading = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reconstruction_pending'"
+    ).fetchone() is None
+    try:
+        # Schema and catch-up must commit together: a restart halfway through an upgrade
+        # must not mistake the new bookkeeping table for a completed migration.
+        conn.executescript("BEGIN;\n" + SCHEMA)
+        if upgrading:
+            conn.execute(
+                "INSERT INTO reconstruction_pending SELECT symbol, MIN(ts), MAX(ts) "
+                "FROM oracle_prices GROUP BY symbol"
+            )
+            conn.execute("UPDATE rounds SET distinct_price_count = NULL WHERE partial = 1")
+            conn.execute(
+                """UPDATE reserves SET
+                       symbol = (SELECT r.symbol FROM rounds r
+                                  WHERE LOWER(r.pool_address) = LOWER(reserves.pool_address)),
+                       round_ending = (SELECT r.ending FROM rounds r
+                                        WHERE LOWER(r.pool_address) = LOWER(reserves.pool_address))
+                     WHERE (symbol IS NULL OR round_ending IS NULL)
+                       AND EXISTS (SELECT 1 FROM rounds r
+                                    WHERE LOWER(r.pool_address) = LOWER(reserves.pool_address))"""
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def connect_readonly(path: str) -> sqlite3.Connection:
+    """Open existing recordings without permission to create or modify a database."""
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn

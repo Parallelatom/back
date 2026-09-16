@@ -36,6 +36,19 @@ explicitly stopped, and why deploying sooner beats deploying tidily.
 nothing is exposed to the internet by default and no inbound port needs opening on the VPS
 firewall. It mounts the database read-only, so it cannot disturb collection whatever it does.
 
+Running `python -m strategy_lab.dashboard` directly also binds to loopback by default.
+Compose explicitly binds the process to `0.0.0.0` inside its container so the tunnel can
+reach it; the published host port remains loopback-only. The server permits four concurrent
+connections, applies a ten-second socket inactivity timeout, and rejects excess connections
+with HTTP 503. Page renders are serialized and cached for up to five seconds, with at most
+eight filter/page combinations retained. Cloudflare Access is still required for authentication
+when publishing a hostname.
+
+Database indexes and incremental reconstruction bookkeeping are installed automatically by
+the Collector on startup. The first upgrade schedules existing price history for one catch-up
+pass and rechecks Partial Rounds; subsequent passes read only ranges with newly recorded prices,
+including historical prices received after a reconnect.
+
 Before the tunnel exists, reach it over SSH:
 
 ```sh

@@ -140,6 +140,61 @@ class TestRefusingToInvent:
         assert {r["symbol"] for r in rounds(ingest)} == {BTC}
 
 
+class TestIncrementalRecovery:
+    def test_new_round_after_restart_and_late_history_are_both_reconstructed(self, tmp_path):
+        path = str(tmp_path / "lab.db")
+        conn = connect(path)
+        initialise(conn)
+        ingest = Ingest(conn, "test")
+        series(ingest, T0, T0 + GRID, lambda ts: 100.0)
+        assert ingest.reconstruct_rounds(BTC) == 1
+        # Leave committed prices waiting for reconstruction across a restart.
+        series(ingest, T0 + GRID + 5, T0 + GRID * 2, lambda ts: 101.0)
+        conn.close()
+
+        conn = connect(path)
+        initialise(conn)
+        ingest = Ingest(conn, "test")
+        assert ingest.reconstruct_rounds(BTC) == 1
+        series(ingest, T0 - GRID, T0 - 5, lambda ts: 99.0)
+        assert ingest.reconstruct_rounds(BTC) == 1
+        assert [r["ending"] for r in rounds(ingest)] == [T0, T0 + GRID, T0 + GRID * 2]
+        assert ingest.reconstruct_rounds(BTC) == 0
+        conn.close()
+
+    def test_reconstruction_cost_does_not_grow_with_unchanged_history(self, ingest):
+        series(ingest, T0, T0 + 20 * GRID, lambda ts: 100.0)
+        assert ingest.reconstruct_rounds(BTC) == 20
+        work = [0]
+
+        def progress():
+            work[0] += 1
+            return 0
+
+        ingest.conn.set_progress_handler(progress, 100)
+        assert ingest.reconstruct_rounds(BTC) == 0
+        assert work[0] < 10
+        ingest.conn.set_progress_handler(None, 0)
+
+    def test_upgrade_repairs_existing_orphan_reserves_and_partial_summaries(self, ingest):
+        # Drop the additions to emulate the database schema from the previous release.
+        ingest.conn.execute("DROP TRIGGER new_price_needs_replay")
+        ingest.conn.execute("DROP TABLE reconstruction_pending")
+        series(ingest, T0, T0 + GRID, lambda ts: 100.0 + (ts - T0) * 0.01)
+        ingest.observe_round(RoundMeta(BTC, T0, T0 + GRID, 100, "0xpool", "up", "down"), T0)
+        ingest.conn.execute("UPDATE rounds SET partial = 1, tick_count = 61, distinct_price_count = 1")
+        ingest.conn.execute("UPDATE reserves SET symbol = NULL, round_ending = NULL")
+        ingest.conn.commit()
+
+        initialise(ingest.conn)
+        assert ingest.finalise_closed_rounds(T0 + GRID + 1) == 1
+        assert rounds(ingest)[0]["partial"] == 0
+        assert rounds(ingest)[0]["tick_count"] == 181
+        stored = ingest.conn.execute("SELECT symbol, round_ending FROM reserves").fetchone()
+        assert tuple(stored) == (BTC, T0 + GRID)
+        assert ingest.reconstruct_rounds(BTC) == 0  # the existing live Round is preserved
+
+
 class TestCorrectingWithAuthoritativeStrikes:
     """A rebuilt Strike is the oracle price nearest the boundary, but the exchange samples
     at the moment the market was created on chain, a few unpredictable seconds earlier. The

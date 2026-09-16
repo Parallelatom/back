@@ -96,6 +96,14 @@ class Ingest:
             (meta.pool_address,),
         ).fetchone()
         if already:
+            # Reconciliation can beat metadata on startup or at a Round boundary.
+            # Keep its observed values and attach them so Replay can actually find them.
+            self.conn.execute(
+                """UPDATE reserves SET symbol = ?, round_ending = ?
+                     WHERE LOWER(pool_address) = LOWER(?)
+                       AND (symbol IS NULL OR round_ending IS NULL)""",
+                (meta.symbol, meta.ending, meta.pool_address),
+            )
             return
         opening = Reserves.opening()
         self._write_reserves(
@@ -129,9 +137,18 @@ class Ingest:
 
         Never disturbs a Round the Collector watched live, and running twice changes nothing.
         """
+        pending = self.conn.execute(
+            "SELECT first_ts, last_ts FROM reconstruction_pending WHERE symbol = ?", (symbol,)
+        ).fetchone()
+        if pending is None:
+            return 0
+        # Include the adjacent Round and the price just before its opening boundary.
+        # The durable range survives restarts and includes out-of-order snapshot inserts.
         series = list(
             self.conn.execute(
-                "SELECT ts, price FROM oracle_prices WHERE symbol = ? ORDER BY ts", (symbol,)
+                "SELECT ts, price FROM oracle_prices WHERE symbol = ? AND ts BETWEEN ? AND ? ORDER BY ts",
+                (symbol, pending["first_ts"] - GRID_SECONDS - MAX_BOUNDARY_GAP_SECONDS,
+                 pending["last_ts"] + GRID_SECONDS),
             )
         )
         if len(series) < 2:
@@ -158,6 +175,7 @@ class Ingest:
                 ),
             )
             written += cursor.rowcount or 0
+        self.conn.execute("DELETE FROM reconstruction_pending WHERE symbol = ?", (symbol,))
         self.conn.commit()
         return written
 

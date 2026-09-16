@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import sqlite3
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Sequence, Tuple
 
@@ -134,7 +135,9 @@ def segments(
 
 def _recorded_throughout(earlier: int, later: int, recorded: Sequence[int]) -> bool:
     """Whether Rounds were recorded continuously between two moments."""
-    span = [earlier] + [t for t in recorded if earlier < t < later] + [later]
+    left = bisect_right(recorded, earlier)
+    right = bisect_left(recorded, later)
+    span = [earlier] + list(recorded[left:right]) + [later]
     return all(b - a <= GAP_SECONDS for a, b in zip(span, span[1:]))
 
 
@@ -348,11 +351,10 @@ def _toggles(include_stale: bool, include_partial: bool) -> str:
     )
 
 
-def _periods_section(conn, include_stale: bool, include_partial: bool) -> str:
+def _periods_section(results_by_symbol) -> str:
     panels = []
     for symbol in sources.SYMBOLS:
-        results = replay(conn, symbol=symbol, strategies=ALL_STRATEGIES,
-                         include_stale=include_stale, include_partial=include_partial)
+        results = results_by_symbol[symbol]
         days, cells = periods_table(results, ALL_STRATEGIES)
         if not days:
             continue
@@ -422,9 +424,11 @@ def render_page(
 ) -> str:
     panels = []
     entries = {}
+    results_by_symbol = {}
     for symbol in sources.SYMBOLS:
         results = replay(conn, symbol=symbol, strategies=ALL_STRATEGIES,
                          include_stale=include_stale, include_partial=include_partial)
+        results_by_symbol[symbol] = results
         for name, result in results.items():
             for trade in result.trades:
                 entries.setdefault((symbol, trade.round_ending), []).append((name, trade.side))
@@ -465,7 +469,7 @@ def render_page(
         alarm=_pricing_alarm(conn),
         toggles=_toggles(include_stale, include_partial),
         rounds=_recent_rounds(conn, entries, include_stale, include_partial, page),
-        periods=_periods_section(conn, include_stale, include_partial),
+        periods=_periods_section(results_by_symbol),
         break_even=f"{BREAK_EVEN_HIT_RATE:.1%}",
         generated=html.escape(format_time(int(datetime.now(timezone.utc).timestamp()))),
         offset=DISPLAY_OFFSET_HOURS,

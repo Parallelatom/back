@@ -39,6 +39,7 @@ services:
     environment:
       STRATEGY_LAB_DB: /data/lab.db
       STRATEGY_LAB_LOG: INFO
+      STRATEGY_LAB_HOST: 0.0.0.0
     logging: *logging
 
   # Reaching the dashboard from outside. The connector dials out to Cloudflare, so the VPS

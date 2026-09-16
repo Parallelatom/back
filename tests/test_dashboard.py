@@ -91,6 +91,17 @@ class TestDisplayedTime:
 
 
 class TestThePage:
+    def test_loading_more_rounds_does_not_add_per_round_queries(self, ingest):
+        for n in range(10):
+            a_round(ingest, ending=T0 + (n + 1) * GRID)
+        statements = []
+        ingest.conn.set_trace_callback(statements.append)
+        page = render_page(ingest.conn)
+        ingest.conn.set_trace_callback(None)
+
+        assert "10 Rounds recorded" in page
+        assert len(statements) <= 16
+
     def test_it_names_every_strategy_for_both_symbols(self, ingest):
         a_round(ingest, symbol=BTC)
         a_round(ingest, symbol=OIL, strike=98.0, close=99.0)

@@ -118,6 +118,21 @@ class TestTradeEvents:
 
 
 class TestReconciling:
+    def test_reconcile_before_metadata_is_used_to_price_paper_trades(self, ingest):
+        from strategy_lab.amm import Reserves, fill
+        from strategy_lab.replay import ALWAYS_UP, replay
+
+        ingest.apply_remote_reserves(POOL.upper(), up=168_578, down=1_483_000, ts=T0 + 400)
+        a_round(ingest)
+        # An unchanged reconciliation must preserve the newly attached Round identity.
+        ingest.apply_remote_reserves(POOL, up=168_578, down=1_483_000, ts=T0 + 500)
+        ingest.conn.execute("UPDATE rounds SET winner = 'UP', oracle_stale = 0, partial = 0")
+        result = replay(ingest.conn, BTC, strategies=[ALWAYS_UP])[ALWAYS_UP.name]
+
+        assert result.trades[0].shares == fill(Reserves(168_578, 1_483_000), "UP", 1_000_000).shares
+        assert result.trades[0].shares == 1_050_199
+        assert len(observations(ingest)) == 1
+
     def test_the_exchanges_answer_is_recorded(self, ingest):
         a_round(ingest)
         ingest.apply_remote_reserves(POOL, up=168_578, down=1_483_000, ts=T0 + 400)

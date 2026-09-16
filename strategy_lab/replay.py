@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 from bisect import bisect_right
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -320,40 +321,44 @@ def load_rounds(
     reversible. A Round that never resolved is left out regardless — no setting can conjure
     a result we never learned.
     """
+    where = (
+        "WHERE r.symbol = ? AND r.winner IS NOT NULL AND r.strike IS NOT NULL "
+        "AND COALESCE(r.unsettled, 0) = 0 "
+        + ("" if include_partial else "AND COALESCE(r.partial, 0) = 0 ")
+        + ("" if include_stale else "AND COALESCE(r.oracle_stale, 0) = 0 ")
+    )
     rows = conn.execute(
-        f"""
-        SELECT symbol, starting, ending, strike, winner FROM rounds
-         WHERE symbol = ?
-           AND winner IS NOT NULL
-           AND strike IS NOT NULL
-           AND COALESCE(unsettled, 0) = 0
-           {"" if include_partial else "AND COALESCE(partial, 0) = 0"}
-           {"" if include_stale else "AND COALESCE(oracle_stale, 0) = 0"}
-         ORDER BY ending
-        """,
+        "SELECT r.symbol, r.starting, r.ending, r.strike, r.winner FROM rounds r "
+        + where + "ORDER BY r.ending",
         (symbol,),
     ).fetchall()
+    if not rows:
+        return []
+
+    # Fetch each series in one indexed join, rather than two extra queries per Round.
+    prices_by_round = defaultdict(list)
+    for observation in conn.execute(
+        "SELECT r.ending, p.ts, p.price FROM rounds r JOIN oracle_prices p "
+        "ON p.symbol = r.symbol AND p.ts BETWEEN COALESCE(NULLIF(r.starting, 0), r.ending - 900) "
+        "AND r.ending " + where + "ORDER BY r.ending, p.ts",
+        (symbol,),
+    ):
+        prices_by_round[observation["ending"]].append((observation["ts"], observation["price"]))
+
+    reserves_by_round = defaultdict(list)
+    for observation in conn.execute(
+        "SELECT r.ending, v.ts, v.q_up, v.q_down FROM rounds r JOIN reserves v "
+        "ON v.symbol = r.symbol AND v.round_ending = r.ending "
+        + where + "ORDER BY r.ending, v.ts, v.rowid",
+        (symbol,),
+    ):
+        reserves_by_round[observation["ending"]].append(
+            (observation["ts"], Reserves(up=observation["q_up"], down=observation["q_down"]))
+        )
 
     records = []
     for row in rows:
         starting = row["starting"] or (row["ending"] - 900)
-        prices = [
-            (observation["ts"], observation["price"])
-            for observation in conn.execute(
-                "SELECT ts, price FROM oracle_prices WHERE symbol = ? AND ts BETWEEN ? AND ? ORDER BY ts",
-                (symbol, starting, row["ending"]),
-            )
-        ]
-        reserves = [
-            (observation["ts"], Reserves(up=observation["q_up"], down=observation["q_down"]))
-            for observation in conn.execute(
-                """
-                SELECT ts, q_up, q_down FROM reserves
-                 WHERE symbol = ? AND round_ending = ? ORDER BY ts, rowid
-                """,
-                (symbol, row["ending"]),
-            )
-        ]
         records.append(
             RoundRecord(
                 symbol=symbol,
@@ -361,8 +366,8 @@ def load_rounds(
                 ending=row["ending"],
                 strike=row["strike"],
                 winner=row["winner"],
-                prices=prices,
-                reserves=reserves,
+                prices=prices_by_round[row["ending"]],
+                reserves=reserves_by_round[row["ending"]],
             )
         )
     return records

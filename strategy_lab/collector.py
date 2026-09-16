@@ -55,11 +55,11 @@ async def poll_rounds(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> None
                 meta = await asyncio.get_running_loop().run_in_executor(
                     None, graph.current_round, symbol
                 )
+                if meta is not None:
+                    ingest.observe_round(meta, now=int(time.time()))
             except Exception:  # a poll must never end the process
+                ingest.conn.rollback()
                 log.exception("round poll failed for %s", symbol)
-                meta = None
-            if meta is not None:
-                ingest.observe_round(meta, now=int(time.time()))
             await _sleep(stop, sources.jittered(POLL_SECONDS))
 
 
@@ -95,7 +95,6 @@ async def verify_pricing(ingest: Ingest, stop: asyncio.Event) -> None:
     catch our own Reserves having drifted. Failing to reach it costs nothing: collection is
     never interrupted for this.
     """
-    from .amm import Reserves, fill
     from .chain import Arbitrum
 
     chain = Arbitrum()
@@ -103,15 +102,13 @@ async def verify_pricing(ingest: Ingest, stop: asyncio.Event) -> None:
     while not stop.is_set():
         for symbol in sources.SYMBOLS:
             try:
-                await asyncio.get_running_loop().run_in_executor(
-                    None, _verify_one, ingest, chain, symbol
-                )
+                await _verify_one(ingest, chain, symbol)
             except Exception:
                 log.exception("pricing check failed for %s", symbol)
         await _sleep(stop, VERIFY_EVERY_SECONDS)
 
 
-def _verify_one(ingest: Ingest, chain, symbol: str) -> None:
+async def _verify_one(ingest: Ingest, chain, symbol: str) -> None:
     from .amm import Reserves, fill
 
     gross = 1_000_000
@@ -128,7 +125,10 @@ def _verify_one(ingest: Ingest, chain, symbol: str) -> None:
     if row is None:
         return
     local = fill(Reserves(up=row["q_up"], down=row["q_down"]), "UP", gross)
-    quoted = chain.quote(row["pool_address"], row["outcome_up"], gross)
+    # Only network I/O leaves this thread. The connection belongs to the event loop.
+    quoted = await asyncio.get_running_loop().run_in_executor(
+        None, chain.quote, row["pool_address"], row["outcome_up"], gross
+    )
     agreed = ingest.record_quote_check(
         row["pool_address"], gross=gross,
         local_shares=local.shares, local_fees=local.fees,
@@ -305,12 +305,18 @@ async def run(db_path: str = DB_PATH, duration: Optional[float] = None) -> None:
     ]
     if duration is not None:
         tasks.append(asyncio.ensure_future(_stop_after(stop, duration)))
+    stopped = asyncio.ensure_future(stop.wait())
     try:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        done, _ = await asyncio.wait(tasks + [stopped], return_when=asyncio.FIRST_COMPLETED)
+        if not stop.is_set():
+            for task in done:
+                task.result()  # Propagate failures so the container restarts visibly.
+            raise RuntimeError("a Collector task stopped unexpectedly")
     finally:
         stop.set()
-        for task in tasks:
+        for task in tasks + [stopped]:
             task.cancel()
+        await asyncio.gather(*tasks, stopped, return_exceptions=True)
         conn.close()
 
 

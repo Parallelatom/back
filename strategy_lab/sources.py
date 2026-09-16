@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 from typing import Any, Dict, Mapping, Optional
 
@@ -204,6 +205,8 @@ def parse_round(symbol: str, campaign: Any) -> Optional[RoundMeta]:
         ending = int(ending)
         starting = int(campaign.get("starting") or 0)
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(strike) or strike <= 0 or not 0 <= starting < ending <= 253402300799:
         return None
     return RoundMeta(
         symbol=symbol,
