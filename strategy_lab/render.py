@@ -29,6 +29,10 @@ RECENT_ROUNDS = 50
 # A week is enough to see an edge closing without the table becoming a spreadsheet.
 PERIODS_SHOWN = 7
 
+# Everything older than that, rolled into one column rather than dropped. The recent days
+# only mean something against a baseline, and the baseline is the stretch before them.
+EARLIER = "Earlier"
+
 COLOURS = {
     "Delta Edge": "#2563eb",
     "Lock Rider": "#0891b2",
@@ -91,7 +95,19 @@ def periods_table(results, strategies):
         (min(seen) + timedelta(days=offset)).strftime("%d %b")
         for offset in range(span + 1)
     ]
-    return days[-PERIODS_SHOWN:], cells
+    recent = days[-PERIODS_SHOWN:]
+    older = days[:-PERIODS_SHOWN]
+    if not older:
+        return recent, cells
+
+    for record in cells.values():
+        totals = [record[day] for day in older if day in record]
+        if totals:
+            record[EARLIER] = (
+                sum(won for won, _ in totals),
+                sum(count for _, count in totals),
+            )
+    return [EARLIER] + recent, cells
 
 
 def segments(
@@ -363,8 +379,9 @@ def _periods_section(conn, include_stale: bool, include_partial: bool) -> str:
             )
         panels.append(
             f"<h3>{html.escape(symbol)}</h3>"
-            f'<table class="periods"><thead><tr><th>Strategy</th>{header}</tr></thead>'
-            f"<tbody>{''.join(rows)}</tbody></table>"
+            f'<div class="scroller"><table class="periods">'
+            f"<thead><tr><th>Strategy</th>{header}</tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>"
         )
     if not panels:
         return '<p class="meta">No settled Rounds recorded yet.</p>'
@@ -512,7 +529,9 @@ _DOCUMENT = """<!doctype html>
   .rounds td, .rounds th {{ font-size: 12px; }}
   h3 {{ font-size: 13px; margin: 14px 0 6px; }}
   .periods td, .periods th {{ font-size: 12px; }}
-  .periods tbody td:first-child {{ width: 38%; }}
+  .periods tbody td:first-child, .periods thead th:first-child {{ min-width: 130px; }}
+  .periods td:not(:first-child), .periods th:not(:first-child) {{ min-width: 78px; }}
+  .scroller {{ overflow-x: auto; }}
   .tag {{ display: inline-block; font-size: 11px; padding: 1px 6px; margin-right: 4px;
           border: 1px solid; border-radius: 4px; }}
   footer {{ padding: 20px 20px 40px; color: var(--muted); font-size: 12px; }}

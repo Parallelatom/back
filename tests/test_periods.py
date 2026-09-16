@@ -8,7 +8,7 @@ import pytest
 
 from strategy_lab.db import connect, initialise
 from strategy_lab.ingest import Ingest, RoundMeta
-from strategy_lab.render import PERIODS_SHOWN, day_of, periods_table, render_page
+from strategy_lab.render import EARLIER, PERIODS_SHOWN, day_of, periods_table, render_page
 from strategy_lab.replay import ALWAYS_UP, replay
 
 BTC = "BTC"
@@ -81,12 +81,12 @@ class TestGroupingByDay:
         days, _ = rows_for(ingest)
         assert days == ["15 Sep", "16 Sep", "17 Sep"]
 
-    def test_only_the_recent_days_are_kept(self, ingest):
+    def test_only_a_weeks_worth_of_dated_columns_are_kept(self, ingest):
         for n in range(PERIODS_SHOWN + 4):
             a_round(ingest, ending=T0 + n * DAY + GRID, close=101.0)
 
         days, _ = rows_for(ingest)
-        assert len(days) == PERIODS_SHOWN
+        assert len([d for d in days if d != EARLIER]) == PERIODS_SHOWN
 
     def test_the_days_kept_are_the_latest_ones(self, ingest):
         for n in range(PERIODS_SHOWN + 2):
@@ -124,3 +124,60 @@ class TestOnThePage:
 
         assert "100%" in render_page(ingest.conn)
         assert "50%" in render_page(ingest.conn, include_stale=True)
+
+
+class TestWhenTheDaysPileUp:
+    """Seven columns is all that fits, but dropping what came before loses the baseline
+    the recent days are supposed to be compared against."""
+
+    def a_run(self, ingest, days, close=101.0):
+        for n in range(days):
+            a_round(ingest, ending=T0 + n * DAY + GRID, close=close)
+
+    def test_a_short_run_needs_no_summary_column(self, ingest):
+        self.a_run(ingest, PERIODS_SHOWN)
+
+        days, _ = rows_for(ingest)
+        assert EARLIER not in days
+
+    def test_a_long_run_keeps_the_older_days_as_one_column(self, ingest):
+        self.a_run(ingest, PERIODS_SHOWN + 3)
+
+        days, _ = rows_for(ingest)
+        assert days[0] == EARLIER
+        assert len(days) == PERIODS_SHOWN + 1
+
+    def test_the_summary_counts_every_older_trade(self, ingest):
+        self.a_run(ingest, PERIODS_SHOWN + 3)
+
+        _, cells = rows_for(ingest)
+        assert cells[ALWAYS_UP.name][EARLIER] == (3, 3)
+
+    def test_the_summary_mixes_wins_and_losses_from_the_whole_stretch(self, ingest):
+        for n in range(PERIODS_SHOWN + 4):
+            a_round(ingest, ending=T0 + n * DAY + GRID, close=101.0 if n % 2 else 99.0)
+
+        _, cells = rows_for(ingest)
+        won, count = cells[ALWAYS_UP.name][EARLIER]
+        assert count == 4
+        assert won == 2
+
+    def test_the_recent_days_are_still_the_latest_ones(self, ingest):
+        self.a_run(ingest, PERIODS_SHOWN + 3)
+
+        days, _ = rows_for(ingest)
+        assert days[-1] == day_of(T0 + (PERIODS_SHOWN + 2) * DAY + GRID)
+
+    def test_a_strategy_with_nothing_older_shows_a_gap_there(self, ingest):
+        self.a_run(ingest, PERIODS_SHOWN + 2)
+        # A Strategy that only ever traded on the final day.
+        from strategy_lab.replay import ALWAYS_DOWN
+
+        days, cells = rows_for(ingest, strategies=(ALWAYS_UP, ALWAYS_DOWN))
+        assert EARLIER in days
+        assert cells[ALWAYS_DOWN.name].get(EARLIER, (0, 0))[1] > 0  # it traded then too
+
+    def test_the_page_labels_the_summary_column(self, ingest):
+        self.a_run(ingest, PERIODS_SHOWN + 2)
+
+        assert EARLIER in render_page(ingest.conn)
