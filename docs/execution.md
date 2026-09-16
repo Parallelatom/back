@@ -86,6 +86,39 @@ It skips unsupported DPPM pools, stale signals and submissions less than 75 seco
 A signal that ages beyond five seconds during quote reads is skipped. Skipping is expected
 when recordings are incomplete/stale; it must not be interpreted as an API failure.
 
+### Readable live logs
+
+The default log format is human-readable text, with clock times in `Asia/Bangkok`.
+Each market line includes the latest observed oracle price (six decimals), Strike,
+signed Delta percentage, time remaining, feed timestamp and age, plus the current reason
+for waiting or submitting. `[STALE]` means the latest recorded price is older than the
+15-second price freshness limit. This is the Collector's observed feed, not a separate
+direct WebSocket connection or an independently scraped website price.
+
+The loop polls every two seconds plus any RPC processing time. A new tick or state prints
+on the next pass; otherwise a heartbeat prints about every five seconds (rounded to a loop
+pass). The upstream feed can update more slowly. During slow RPC calls logging also waits;
+feed timestamps/ages make that lag visible. Price formatting may differ from the website's
+rounding. No additional network request is made solely to render a log line.
+
+`ROUND` announces a new Round, `ORDER` shows a changed position, and `TX` includes an explorer
+link as soon as its hash is known, before finality. `LEDGER` is explicitly labeled as the
+computed budget balance, not the wallet's live balance. The on-chain wallet balance is shown
+at preflight. Log output does not include Authorization, private keys or signed raw bytes.
+
+```sh
+bash run-live.sh XYZCL --execute --watch
+# Optional machine-readable output, including market timestamps/prices:
+bash run-live.sh XYZCL --execute --watch --log-format json
+# Optional display settings (do not run simultaneously for the same wallet):
+bash run-live.sh XYZCL --execute --watch --log-timezone UTC --log-interval 10
+```
+
+Even if new entries are disabled or the trade limit is reached, available prices continue
+to display while outstanding positions reconcile. Logging does not change strategy or
+submission conditions. A Collector read failure blocks new buys but does not stop existing
+on-chain reconciliation; never treat a missing display value as a quote.
+
 ### Stop and recovery
 
 ```sh

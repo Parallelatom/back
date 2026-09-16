@@ -1,8 +1,9 @@
 """Explicit live entry point. Without --execute, only read-only preflight runs."""
 import argparse
 import fcntl
-import json
 import os
+import math
+import sqlite3
 from pathlib import Path
 import tempfile
 import time
@@ -12,6 +13,7 @@ from .accounts import address, read_profiles
 from .engine import Executor
 from .errors import SetupError
 from .live import LiveBroker, settings_from_profile
+from .logging import LiveLog, market_status
 from .signals import Recordings
 from .store import Ledger
 
@@ -25,6 +27,9 @@ def main():
     parser.add_argument("--halt-file", required=True, help="stops entries, keeps claims running")
     parser.add_argument("--execute", action="store_true", help="allow real buys and signed claims")
     parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--log-format", choices=("text", "json"), default="text")
+    parser.add_argument("--log-timezone", default="Asia/Bangkok")
+    parser.add_argument("--log-interval", type=float, default=5, help="heartbeat seconds; new prices/states print immediately")
     parser.add_argument("--attach-buy", nargs=2, metavar=("POSITION_ID", "TX_HASH"))
     parser.add_argument("--retry-claim", metavar="POSITION_ID")
     args = parser.parse_args()
@@ -33,6 +38,9 @@ def main():
     lock = None
     stage = "public configuration"
     try:
+        if not math.isfinite(args.log_interval) or args.log_interval <= 0:
+            raise SetupError("LOG_INTERVAL: heartbeat must be positive seconds")
+        log = LiveLog(args.log_format, args.log_timezone, args.log_interval)
         profile = read_profiles(args.config, selected_symbol=args.symbol)["wallets"][args.symbol]
         wallet = address(profile["address"])
         settings = settings_from_profile(profile, args.symbol, wallet)
@@ -53,7 +61,7 @@ def main():
         stage = "credentials and live limits"
         broker = LiveBroker(ledger, profile, args.symbol)
         stage = "read-only Arbitrum preflight"
-        print(json.dumps({"preflight": broker.preflight(), "execute": args.execute}), flush=True)
+        log.preflight(broker.preflight(), args.execute)
         if not args.execute:
             return
         stage = "live execution/recovery"
@@ -62,29 +70,38 @@ def main():
         if args.retry_claim:
             broker.retry_claim(args.retry_claim)
         engine = Executor(settings, ledger, broker)
-        last_report = None
         while True:
             now = int(time.time())
             engine.advance(now, broker.settlement)
+            now = int(time.time())
             blocked = broker.entry_block()
             halted = Path(args.halt_file).exists()
             reason = blocked or ("new entries disabled" if halted or not settings.enabled else None)
-            if reason is None:
+            snapshot = None
+            readings_failed = False
+            try:
                 conn = connect_readonly(args.recordings)
                 try:
                     conn.execute("BEGIN")
                     snapshot = Recordings(conn).current(args.symbol, now)
                 finally:
                     conn.close()
-                reason = engine.enter(snapshot, now, halted) if snapshot else "no live Round recorded"
+            except (sqlite3.Error, OSError):
+                readings_failed = True
+            if reason is None:
+                if readings_failed:
+                    reason = "recordings unavailable"
+                else:
+                    reason = engine.enter(snapshot, now, halted) if snapshot else "no live Round recorded"
             engine.advance(int(time.time()), broker.settlement)
             summary = ledger.summary(settings)
             gas = ledger.conn.execute("SELECT COALESCE(SUM(gas_wei),0) FROM live_ops WHERE operation='redeem'").fetchone()[0]
-            report = json.dumps({"reason": reason, "claim_gas_wei": gas,
-                                 "cash_excludes_eth_gas": True, **summary})
-            if report != last_report:
-                print(report, flush=True)
-                last_report = report
+            transactions = [dict(row) for row in ledger.conn.execute(
+                "SELECT position_id,operation,tx_hash FROM live_ops ORDER BY position_id,operation")]
+            logged_at = int(time.time())
+            log.report({"reason": reason, "claim_gas_wei": gas,
+                        "cash_excludes_eth_gas": True, "market": market_status(snapshot, logged_at, settings),
+                        "transactions": transactions, **summary}, logged_at)
             if not args.watch:
                 break
             time.sleep(2)

@@ -373,7 +373,7 @@ def test_default_cli_does_not_enter_or_advance(rig, monkeypatch, tmp_path, capsy
     monkeypatch.setattr(run_live, "LiveBroker", lambda *a: rig.broker)
     monkeypatch.setattr(run_live, "Executor", lambda *a: pytest.fail("default CLI must not start an executor"))
     monkeypatch.setattr("sys.argv", ["run_live", "--config", str(path), "--symbol", "BTC",
-        "--ledger", str(tmp_path / "other.db"), "--halt-file", str(tmp_path / "HALT")])
+        "--ledger", str(tmp_path / "other.db"), "--halt-file", str(tmp_path / "HALT"), "--log-format", "json"])
     run_live.main()
     output = capsys.readouterr().out
     assert '"execute": false' in output and "test-only-authorization" not in output

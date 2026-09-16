@@ -1,0 +1,117 @@
+"""Human-readable live telemetry from recorded prices, without extra RPC or secrets."""
+from datetime import datetime
+from dataclasses import replace
+import json
+import math
+from zoneinfo import ZoneInfo
+
+from ..replay import DELTA_THRESHOLD_PCT, DEFAULT_DELTA_THRESHOLD_PCT, delta_edge
+
+
+def clock(ts, timezone):
+    return datetime.fromtimestamp(ts, timezone).strftime("%H:%M:%S")
+
+
+def market_status(snapshot, now, settings):
+    if snapshot is None:
+        return None
+    record = snapshot.record
+    prices = [(ts, value) for ts, value in record.prices if record.starting <= ts <= now]
+    latest = max(prices, key=lambda pair: pair[0]) if prices else None
+    price = latest[1] if latest and math.isfinite(latest[1]) and latest[1] > 0 else None
+    strike = record.strike if math.isfinite(record.strike) and record.strike > 0 else None
+    delta = (price - strike) / strike * 100 if price is not None and strike else None
+    # Use the same first-crossing rule as the strategy, but never change its decision.
+    first = delta_edge().decide(replace(record, prices=prices)) if prices and strike else None
+    return {"symbol": record.symbol, "round_start": record.starting, "round_end": record.ending,
+            "pool": snapshot.pool, "price": price, "strike": strike, "delta_pct": delta,
+            "threshold_pct": DELTA_THRESHOLD_PCT.get(record.symbol, DEFAULT_DELTA_THRESHOLD_PCT),
+            "price_timestamp": latest[0] if latest else None,
+            "price_age_seconds": now - latest[0] if latest else None,
+            "price_stale": not latest or now - latest[0] > settings.max_age_seconds,
+            "remaining_seconds": max(0, record.ending - now),
+            "first_signal_timestamp": first.at if first else None,
+            "first_signal_side": first.side if first else None,
+            "signal_age_seconds": now - first.at if first else None,
+            "max_signal_age_seconds": settings.max_signal_age_seconds}
+
+
+def explain(reason, market):
+    if reason == "no fresh Strategy signal":
+        if market and market["signal_age_seconds"] is not None and market["signal_age_seconds"] > market["max_signal_age_seconds"]:
+            return f"พลาดสัญญาณแรก {market['first_signal_side']} มา {market['signal_age_seconds']}s แล้ว — รอรอบถัดไป"
+        return "รอ Delta เข้าเงื่อนไข"
+    return {
+        "outside Trade Window": "อยู่นอกช่วงซื้อ (live เหลือ 300–75s)",
+        "new entries disabled": "ปิดซื้อใหม่ / มีไฟล์ HALT",
+        "configured lifetime trade count reached": "ครบจำนวนรอบทดลอง — ยังติดตามสถานะ/claim ต่อ",
+        "already recorded": "รอบนี้บันทึกคำสั่งแล้ว — ไม่ส่งซื้อซ้ำ",
+        "no live Round recorded": "รอข้อมูลรอบจาก Collector",
+        "recordings unavailable": "อ่านข้อมูล Collector ไม่ได้ — ไม่ส่งซื้อใหม่",
+        "stale oracle price": "ราคาจาก Collector เก่าเกินกำหนด",
+        "stale Round metadata": "ข้อมูลรอบจาก Collector เก่าเกินกำหนด",
+        "Partial Round at decision time": "ข้อมูลราคาของรอบไม่ครบ",
+        "Oracle Stale at decision time": "ราคาของรอบยังไม่มีการเปลี่ยนแปลง",
+        "signal expired while fetching live quote": "สัญญาณหมดอายุระหว่างอ่าน quote — ไม่ส่งซื้อ",
+        "BUY_PENDING": "ส่งซื้อแล้ว/รอตรวจสอบผล — ยังไม่ยืนยันว่าได้ shares",
+        "open-position limit": "มีรายการค้างอยู่ — รอปิดรายการเดิม",
+    }.get(reason, reason)
+
+
+class LiveLog:
+    def __init__(self, format="text", timezone="Asia/Bangkok", interval=5, emit=None):
+        self.format, self.timezone = format, ZoneInfo(timezone)
+        self.interval = interval
+        self.emit = emit or (lambda text: print(text, flush=True))
+        self.last_key = None
+        self.last_at = None
+        self.positions = {}
+        self.round = None
+
+    def preflight(self, result, execute):
+        if self.format == "json":
+            self.emit(json.dumps({"preflight": result, "execute": execute}))
+            return
+        self.emit(f"PRECHECK | wallet={result['wallet']} | Arbitrum {result['chain_id']}")
+        self.emit(f"WALLET   | USDC={result['usdc_micro']/1e6:.6f} | ETH={result['eth_wei']/1e18:.8f} | signer ตรงกับ wallet | API auth ยังไม่ยืนยัน")
+        self.emit(f"MODE     | {'LIVE: ส่งเงินจริงได้ตาม config' if execute else 'CHECK ONLY: ไม่ส่งธุรกรรม'} | เวลา {self.timezone.key} | ราคา=9lives oracle ผ่าน Collector (ไม่ใช่ราคา shares)")
+
+    def report(self, report, now):
+        market = report.get("market")
+        # New tick/status prints immediately; otherwise provide a bounded heartbeat.
+        key = json.dumps({"reason": report["reason"], "positions": report["positions"],
+                          "transactions": report.get("transactions", []),
+                          "tick": (market["round_end"], market["price_timestamp"], market["price"], market["strike"]) if market else None}, sort_keys=True)
+        if key == self.last_key and self.last_at is not None and now - self.last_at < self.interval:
+            return
+        self.last_key, self.last_at = key, now
+        if self.format == "json":
+            self.emit(json.dumps({"logged_at": now, **report}))
+            return
+        prefix = f"[{clock(now, self.timezone)}]"
+        if market:
+            if self.round != market["round_end"]:
+                self.emit(f"{prefix} ROUND {market['symbol']} | {clock(market['round_start'], self.timezone)}–{clock(market['round_end'], self.timezone)} | เกณฑ์ |Delta| > {market['threshold_pct']:.2f}%")
+                self.round = market["round_end"]
+            price = f"{market['price']:,.6f}" if market["price"] is not None else "--"
+            strike = f"{market['strike']:,.6f}" if market["strike"] is not None else "--"
+            delta = f"{market['delta_pct']:+.4f}%" if market["delta_pct"] is not None else "--"
+            feed = clock(market["price_timestamp"], self.timezone) if market["price_timestamp"] is not None else "--"
+            age = f"{market['price_age_seconds']}s" if market["price_age_seconds"] is not None else "--"
+            minutes, seconds = divmod(market["remaining_seconds"], 60)
+            self.emit(f"{prefix} {market['symbol']} | ราคา {price} | Strike {strike} | Delta {delta} | เหลือ {minutes:02d}:{seconds:02d} | feed {feed} อายุ {age}{' [STALE]' if market['price_stale'] else ''} | {explain(report['reason'], market)}")
+        else:
+            self.emit(f"{prefix} WAIT | ราคา -- | {explain(report['reason'], None)}")
+        txs = report.get("transactions", [])
+        for p in report["positions"]:
+            refs = [(t["operation"], t["tx_hash"]) for t in txs if t["position_id"] == p["id"] and t["tx_hash"]]
+            state_key = json.dumps([p, refs], sort_keys=True)
+            if self.positions.get(p["id"]) == state_key:
+                continue
+            self.positions[p["id"]] = state_key
+            self.emit(f"{prefix} ORDER {p['state']} | {p['symbol']} {p['side']} | id={p['id']} | stake={p['amount']/1e6:.2f} USDC | จ่ายยืนยัน={p['cost']/1e6:.6f} | shares={p['shares']/1e6:.6f} | รับคืนยืนยัน={p['payout']/1e6:.6f}")
+            for operation, tx in refs:
+                self.emit(f"{prefix} TX {operation} | https://arbiscan.io/tx/{tx}")
+            if p.get("error"):
+                self.emit(f"{prefix} REVIEW | {p['error']}")
+            self.emit(f"{prefix} LEDGER | ยอดคำนวณ={report['cash_usd']:.6f} USDC (ไม่ใช่ยอด wallet สด) | กันไว้={report['reserved_usd']:.2f} | claim gas={report['claim_gas_wei']/1e18:.8f} ETH")
