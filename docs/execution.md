@@ -77,6 +77,11 @@ These are local bot limits, not restrictions on the credential itself or on exte
 Collector must be running and writing `data/lab.db`. The live runner uses only fresh complete
 Round observations and the same Delta Edge signal. It additionally checks pool expiry,
 binary outcomes, share-token mapping, existing shares, quote and balances directly on chain.
+Live Delta Edge does not require recent recorded reserves: those records only advance when
+reserves change. Its direction signal uses prices and Strike, and a fresh successful chain
+quote is mandatory before any reservation or submission. There is no opening-price fallback.
+Paper execution keeps requiring fresh recorded reserves for its simulated fill. This
+exception does not enable reserve-dependent live strategies.
 It skips unsupported DPPM pools, stale signals and submissions less than 75 seconds from expiry.
 A signal that ages beyond five seconds during quote reads is skipped. Skipping is expected
 when recordings are incomplete/stale; it must not be interpreted as an API failure.
@@ -226,8 +231,8 @@ copies and ledgers are gitignored.
 
 The Collector currently records reconciliation only when Reserves change. Therefore the
 strict freshness gate can skip otherwise valid Rounds whose pool has not changed recently.
-The live adapter also checks a fresh on-chain quote after the signal gate; it does not
-bypass missing/stale recorded evidence. Rehearsal results are not expected to match
+The live adapter instead requires a fresh on-chain quote after the Delta Edge signal gate;
+it still requires fresh metadata and complete, fresh oracle prices. Rehearsal results are not expected to match
 the retrospective dashboard. The existing dashboard does not display these new ledgers.
 
 ## Integration research, checked 2026-09-16

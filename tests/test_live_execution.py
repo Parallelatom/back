@@ -1,5 +1,6 @@
 """No real network: real signing with a throwaway test key, fake Accounts and RPC."""
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -247,6 +248,63 @@ def test_slippage_acknowledgement_required_before_api(rig):
     rig.profile["accept_unprotected_slippage"] = False
     reason = Executor(rig.settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
     assert reason.startswith("quote unavailable") and not rig.posts
+
+
+@pytest.mark.parametrize("source,observations", [
+    ("graphql", [(START, Reserves.opening())]),
+    ("seed", [(START, Reserves.opening())]), ("missing", []),
+])
+def test_live_delta_uses_chain_quote_when_reserve_record_is_old_or_missing(rig, monkeypatch, source, observations):
+    snapshot = replace(rig.snapshot, reserve_source=source,
+                       record=replace(rig.snapshot.record, reserves=observations))
+    original = rig.rpc.view
+    quoted = []
+    def view(target, signature, *args, **kwargs):
+        if signature == "quoteC0E17FC7(bytes8,uint256)":
+            quoted.append(True)
+            return (1200000, 17000, 0)
+        return original(target, signature, *args, **kwargs)
+    monkeypatch.setattr(rig.rpc, "view", view)
+    assert Executor(rig.settings, rig.ledger, rig.broker).enter(snapshot, NOW) == "BUY_PENDING"
+    assert quoted == [True] and len(rig.posts) == 1
+    assert rig.ledger.positions()[0]["quoted_shares"] == 1200000
+
+
+@pytest.mark.parametrize("kind", ["fails", "zero", "stale"])
+def test_missing_reserves_never_falls_back_when_chain_quote_unusable(rig, monkeypatch, kind):
+    from strategy_lab.execution.paper import Quote
+    snapshot = replace(rig.snapshot, reserve_source="missing",
+                       record=replace(rig.snapshot.record, reserves=[]))
+    def quote(*args):
+        if kind == "fails": raise ValueError("RPC failed")
+        return Quote(0 if kind == "zero" else 1314422, NOW - 16 if kind == "stale" else NOW)
+    monkeypatch.setattr(rig.broker, "quote", quote)
+    Executor(rig.settings, rig.ledger, rig.broker).enter(snapshot, NOW)
+    assert not rig.posts and not rig.ledger.positions()
+
+
+@pytest.mark.parametrize("kind", ["stale-price", "partial", "stale-metadata", "expired-signal"])
+def test_live_reserve_change_preserves_signal_guards(rig, kind):
+    snapshot = replace(rig.snapshot, reserve_source="missing",
+                       record=replace(rig.snapshot.record, reserves=[]))
+    now = NOW
+    if kind == "stale-price":
+        snapshot = replace(snapshot, record=replace(snapshot.record, prices=snapshot.record.prices[:-10]))
+    elif kind == "partial":
+        snapshot = replace(snapshot, record=replace(snapshot.record, prices=snapshot.record.prices[70:]))
+    elif kind == "stale-metadata":
+        snapshot = replace(snapshot, metadata_at=START)
+    else:
+        now += 6
+    Executor(rig.settings, rig.ledger, rig.broker).enter(snapshot, now)
+    assert not rig.posts and not rig.ledger.positions()
+
+
+def test_live_reserve_dependent_strategy_is_not_silently_enabled(rig):
+    settings = SimpleNamespace(**{**rig.settings.__dict__, "strategy": "Lock Rider"})
+    reason = Executor(settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
+    assert reason == "live signal supports Delta Edge only"
+    assert not rig.posts
 
 
 def test_wrong_outcome_event_is_not_accepted(rig):

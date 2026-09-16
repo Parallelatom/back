@@ -41,11 +41,20 @@ def decide(snapshot, settings, now):
         return None, "Partial Round at decision time"
     if len({price for _, price in prices}) < 2:
         return None, "Oracle Stale at decision time"
-    if (not reserves or snapshot.reserve_source not in ("trade", "graphql")
-            or now - reserves[-1][0] > settings.max_age_seconds):
-        return None, "no fresh observed Reserves; opening assumptions are not executable quotes"
-    if any(value.up <= 0 or value.down <= 0 for _, value in reserves):
-        return None, "invalid Reserves"
+    if settings.mode == "live":
+        # Delta Edge uses only prices and Strike. Collector timestamps represent reserve
+        # changes, not freshness of a read: unchanged pools may retain old/seed rows.
+        # Executor still requires a successful fresh on-chain quote before reserving or
+        # submitting. Do not extend this exception to reserve-dependent strategies.
+        if settings.strategy != "Delta Edge":
+            return None, "live signal supports Delta Edge only"
+        reserves = []
+    else:
+        if (not reserves or snapshot.reserve_source not in ("trade", "graphql")
+                or now - reserves[-1][0] > settings.max_age_seconds):
+            return None, "no fresh observed Reserves; opening assumptions are not executable quotes"
+        if any(value.up <= 0 or value.down <= 0 for _, value in reserves):
+            return None, "invalid Reserves"
     causal = replace(record, prices=prices, reserves=reserves)
     strategy = next(s for s in ALL_STRATEGIES if s.name == settings.strategy)
     entry = strategy.decide(causal)
