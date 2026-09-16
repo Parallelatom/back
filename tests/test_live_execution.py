@@ -70,8 +70,10 @@ class FakeRPC:
         if method == "eth_chainId": return "0xa4b1"
         if method == "eth_getCode": return "0x" if params[0] not in (USDC, CLAIMANT) else "0x1234"
         if method == "eth_getBalance": return hex(10**17)
-        if method == "eth_call": return "0x" + encode(("uint256[]",), ([1314422],)).hex()
-        if method == "eth_estimateGas": return hex(200000)
+        if method in ("eth_call", "eth_estimateGas"):
+            assert "chainId" not in params[0], "integer signing fields must not leak into RPC calls"
+            assert params[0]["value"] == "0x0"
+            return "0x" + encode(("uint256[]",), ([1314422],)).hex() if method == "eth_call" else hex(200000)
         if method == "eth_gasPrice": return hex(self.gas_price)
         if method == "eth_getTransactionCount": return hex(self.pending_nonce if params[1] == "pending" else 0)
         if method == "eth_sendRawTransaction":

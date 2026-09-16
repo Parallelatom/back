@@ -227,11 +227,14 @@ class LiveBroker:
         if self.balance(buy["share_token"]) != position["shares"]:
             raise ValueError("share balance changed; reconcile manual/automatic claim")
         unsigned = claim_transaction(self.wallet, position["pool"])
-        simulation = self.rpc.call("eth_call", [unsigned, "latest"])
+        # The signing payload uses integer chainId; JSON-RPC TransactionArgs expects
+        # hex quantities. Chain is pinned by preflight/signing, so omit it for calls.
+        rpc_tx = {key: value for key, value in unsigned.items() if key != "chainId"}
+        simulation = self.rpc.call("eth_call", [rpc_tx, "latest"])
         payouts = decode(("uint256[]",), bytes.fromhex(simulation[2:]))[0]
         if len(payouts) != 1 or payouts[0] <= 0:
             raise ValueError("claim simulation returns no payout")
-        gas = (int(self.rpc.call("eth_estimateGas", [unsigned]), 16) * 120 + 99) // 100
+        gas = (int(self.rpc.call("eth_estimateGas", [rpc_tx]), 16) * 120 + 99) // 100
         gas_price = int(self.rpc.call("eth_gasPrice", []), 16) * 2
         if gas_price <= 0 or gas <= 0 or gas * gas_price > self.gas_cap:
             raise ValueError("claim exceeds gas cap")
