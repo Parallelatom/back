@@ -16,6 +16,7 @@ from eth_utils import keccak, to_checksum_address
 from .accounts import (CLAIMANT, ENDPOINT, USDC, ZERO, address, claim_transaction,
                        hex_value, inspect_receipt, mint_hash, mint_payload)
 from .config import Settings
+from .errors import SetupError
 from .paper import Quote, Receipt
 
 
@@ -41,7 +42,7 @@ class RPC:
                 raise ValueError()
             return reply["result"]
         except (requests.RequestException, ValueError):
-            raise ValueError("RPC request failed; reconcile before retry") from None
+            raise SetupError("RPC_REQUEST: Arbitrum RPC failed or rejected the call; check connectivity and retry read-only preflight") from None
 
     def view(self, target, signature, inputs=(), values=(), outputs=("uint256",), block="latest"):
         raw = self.call("eth_call", [{"to": address(target),
@@ -77,18 +78,26 @@ class LiveBroker:
         self.ledger, self.profile = ledger, profile
         self.wallet = address(profile["address"])
         self.rpc = rpc or RPC()
-        self.account = account or Account.from_key(os.environ.get("NINELIVES_" + symbol + "_PRIVATE_KEY", ""))
+        if account is None:
+            key = os.environ.get("NINELIVES_" + symbol + "_PRIVATE_KEY", "")
+            if not key.strip():
+                raise SetupError("PRIVATE_KEY_MISSING: fill the selected wallet's NINELIVES_<SYMBOL>_PRIVATE_KEY in execution-secrets.env")
+            try:
+                account = Account.from_key(key)
+            except Exception:
+                raise SetupError("PRIVATE_KEY_INVALID: expected a 32-byte hex private key, not Authorization or a seed phrase") from None
+        self.account = account
         if self.account.address.lower() != self.wallet:
-            raise ValueError("claim signing key does not match configured wallet")
+            raise SetupError("PRIVATE_KEY_MISMATCH: claim signing key does not match configured wallet address")
         self.auth = os.environ.get(profile["authorization_env"], "")
         if not self.auth.strip() or any(c in self.auth for c in "\r\n"):
-            raise ValueError("Authorization is missing or invalid")
+            raise SetupError("AUTHORIZATION_MISSING: fill the selected Authorization environment variable with the full single-line value")
         self.max_trades = profile.get("max_trades", 1)
         self.gas_cap = profile.get("claim_gas_cap_wei", 100_000_000_000_000)
         if type(self.max_trades) is not int or not 1 <= self.max_trades <= 10:
-            raise ValueError("max_trades must be 1..10 per ledger")
+            raise SetupError("CONFIG_MAX_TRADES: max_trades must be an integer 1..10 per ledger")
         if type(self.gas_cap) is not int or not 0 < self.gas_cap <= 10**15:
-            raise ValueError("claim gas cap must be positive and at most 0.001 ETH")
+            raise SetupError("CONFIG_GAS_CAP: claim gas cap must be a positive integer at most 1000000000000000 wei")
         ledger.conn.executescript("""
             CREATE TABLE IF NOT EXISTS live_ops (
                 position_id TEXT NOT NULL, operation TEXT NOT NULL,
@@ -100,14 +109,14 @@ class LiveBroker:
 
     def preflight(self):
         if self.rpc.call("eth_chainId", []) != "0xa4b1":
-            raise ValueError("wrong chain")
+            raise SetupError("RPC_CHAIN: RPC did not return Arbitrum One chain ID")
         for contract in (USDC, CLAIMANT):
             if self.rpc.call("eth_getCode", [contract, "latest"]) == "0x":
-                raise ValueError("required contract missing")
+                raise SetupError("RPC_CONTRACT: required USDC or Claimant contract has no code")
         if self.rpc.call("eth_getCode", [self.wallet, "latest"]) != "0x":
-            raise ValueError("this signer supports EOA wallets only")
+            raise SetupError("WALLET_TYPE: wallet has contract code; this signer supports plain EOA wallets only")
         if self.rpc.view(USDC, "decimals()", outputs=("uint8",))[0] != 6:
-            raise ValueError("wrong token decimals")
+            raise SetupError("RPC_TOKEN: USDC decimals must be 6")
         return {"wallet": self.wallet, "chain_id": 42161,
                 "usdc_micro": self.balance(USDC),
                 "eth_wei": int(self.rpc.call("eth_getBalance", [self.wallet, "latest"]), 16),

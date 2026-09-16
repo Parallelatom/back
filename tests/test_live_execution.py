@@ -218,6 +218,21 @@ def test_wrong_signer_rejected(rig):
         LiveBroker(rig.ledger, rig.profile, "BTC", rig.rpc, Account.from_key(bytes.fromhex("02" * 32)))
 
 
+@pytest.mark.parametrize("key,code", [("", "PRIVATE_KEY_MISSING"),
+    ("sensitive-not-a-key", "PRIVATE_KEY_INVALID"), ("02" * 32, "PRIVATE_KEY_MISMATCH")])
+def test_signer_diagnostics_are_specific_without_exposing_key(rig, monkeypatch, key, code):
+    monkeypatch.setenv("NINELIVES_BTC_PRIVATE_KEY", key)
+    with pytest.raises(ValueError, match=code) as err:
+        LiveBroker(rig.ledger, rig.profile, "BTC", rig.rpc)
+    assert not key or key not in str(err.value)
+
+
+def test_missing_authorization_has_safe_diagnostic(rig, monkeypatch):
+    monkeypatch.delenv("NINELIVES_BTC_AUTHORIZATION")
+    with pytest.raises(ValueError, match="AUTHORIZATION_MISSING"):
+        LiveBroker(rig.ledger, rig.profile, "BTC", rig.rpc, rig.account)
+
+
 def test_no_final_receipt_never_debits_and_wrong_wallet_remains_pending(rig):
     engine = Executor(rig.settings, rig.ledger, rig.broker)
     engine.enter(rig.snapshot, NOW)

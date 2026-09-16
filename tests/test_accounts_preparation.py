@@ -109,3 +109,27 @@ def test_readonly_rpc_refuses_unfinalized_or_wrong_chain(monkeypatch, fault):
 
 def test_rpc_cannot_broadcast():
     with pytest.raises(ValueError): ReadOnlyRPC().call("eth_sendRawTransaction", [])
+
+
+def test_selected_symbol_allows_unused_disabled_wallet_blank(tmp_path):
+    config = json.loads(open("execution-accounts.example.json").read())
+    config["wallets"]["XYZCL"]["address"] = WALLET
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+    assert read_profiles(path, selected_symbol="XYZCL")["wallets"]["BTC"]["address"] == ""
+    with pytest.raises(ValueError, match="CONFIG_ADDRESS_BTC"):
+        read_profiles(path, selected_symbol="BTC")
+    config["wallets"]["BTC"]["enabled"] = True
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="CONFIG_ADDRESS_BTC"):
+        read_profiles(path, selected_symbol="XYZCL")
+
+
+def test_profile_diagnostics_never_echo_invalid_input(tmp_path):
+    config = json.loads(open("execution-accounts.example.json").read())
+    config["wallets"]["XYZCL"]["address"] = "sensitive-pasted-in-wrong-field"
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="CONFIG_ADDRESS_XYZCL") as err:
+        read_profiles(path, selected_symbol="XYZCL")
+    assert "sensitive" not in str(err.value)

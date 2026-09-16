@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 import requests
+from .errors import SetupError
 
 ENDPOINT = "https://arb-accounts.superposition.so/"
 USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
@@ -30,29 +31,47 @@ def address(value):
     return value
 
 
-def read_profiles(path):
+def read_profiles(path, selected_symbol=None):
     """Public configuration only; secrets live in named environment variables."""
-    data = json.loads(Path(path).read_text())
+    try:
+        data = json.loads(Path(path).read_text())
+    except OSError:
+        raise SetupError("CONFIG_FILE: cannot read the public JSON configuration") from None
+    except (ValueError, UnicodeError):
+        raise SetupError("CONFIG_JSON: configuration is not valid UTF-8 JSON") from None
+    if not isinstance(data, dict):
+        raise SetupError("CONFIG_JSON: configuration must be a JSON object")
     if data.get("chain_id") != 42161 or data.get("accounts_url") != ENDPOINT:
-        raise ValueError("expected the observed Arbitrum Accounts endpoint")
+        raise SetupError("CONFIG_NETWORK: expected chain_id 42161 and https://arb-accounts.superposition.so/")
     wallets = data.get("wallets", {})
-    if set(wallets) != {"BTC", "XYZCL"}:
-        raise ValueError("configure separate BTC and XYZCL wallets")
+    if not isinstance(wallets, dict) or set(wallets) != {"BTC", "XYZCL"}:
+        raise SetupError("CONFIG_WALLETS: configuration must contain BTC and XYZCL profiles")
     seen = set()
     env_names = set()
     for symbol, profile in wallets.items():
-        wallet = address(profile["address"])
+        if not isinstance(profile, dict):
+            raise SetupError("CONFIG_PROFILE: each wallet profile must be a JSON object")
+        if type(profile.get("enabled", False)) is not bool:
+            raise SetupError("CONFIG_ENABLED: enabled must be true or false without quotes")
+        # Single-Symbol preflight must not require a wallet the user is not using.
+        if (selected_symbol in ("BTC", "XYZCL") and symbol != selected_symbol
+                and profile.get("enabled", False) is False and not profile.get("address")):
+            continue
+        try:
+            wallet = address(profile.get("address"))
+        except ValueError:
+            raise SetupError(f"CONFIG_ADDRESS_{symbol}: fill a nonzero public address (0x plus 40 hex characters)") from None
         if wallet in seen:
-            raise ValueError("BTC and XYZCL must use different wallets")
+            raise SetupError("CONFIG_DUPLICATE_WALLET: BTC and XYZCL must use different wallets")
         seen.add(wallet)
-        name = profile["authorization_env"]
-        if not re.fullmatch(r"NINELIVES_(BTC|XYZCL)_AUTHORIZATION", name) or name in env_names:
-            raise ValueError("each wallet needs its own authorization environment variable")
+        name = profile.get("authorization_env")
+        if not isinstance(name, str) or not re.fullmatch(r"NINELIVES_(BTC|XYZCL)_AUTHORIZATION", name) or name in env_names:
+            raise SetupError("CONFIG_AUTH_ENV: use a distinct NINELIVES_<SYMBOL>_AUTHORIZATION variable name")
         env_names.add(name)
         if name != "NINELIVES_" + symbol + "_AUTHORIZATION":
-            raise ValueError("authorization environment variable must match Symbol")
+            raise SetupError("CONFIG_AUTH_ENV: authorization environment variable must match Symbol")
         if profile.get("stake_micro") != 1_000_000 or profile.get("budget_micro") != 10_000_000:
-            raise ValueError("expected 1 USDC stake and 10 USDC budget per wallet")
+            raise SetupError("CONFIG_BUDGET: expected stake_micro 1000000 and budget_micro 10000000")
     return data
 
 

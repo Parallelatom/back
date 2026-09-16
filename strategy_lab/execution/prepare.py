@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--operation", choices=["buy", "claim"], default="buy")
     args = parser.parse_args()
     try:
-        config = read_profiles(args.config)
+        config = read_profiles(args.config, selected_symbol=args.symbol)
         profile = config["wallets"][args.symbol]
         result = {"mode": "preparation_only", "symbol": args.symbol,
                   "authorization_present": credential_present(profile["authorization_env"]),

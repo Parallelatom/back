@@ -10,6 +10,7 @@ import time
 from ..db import connect_readonly
 from .accounts import address, read_profiles
 from .engine import Executor
+from .errors import SetupError
 from .live import LiveBroker, settings_from_profile
 from .signals import Recordings
 from .store import Ledger
@@ -30,8 +31,9 @@ def main():
     os.umask(0o077)
     ledger = None
     lock = None
+    stage = "public configuration"
     try:
-        profile = read_profiles(args.config)["wallets"][args.symbol]
+        profile = read_profiles(args.config, selected_symbol=args.symbol)["wallets"][args.symbol]
         wallet = address(profile["address"])
         settings = settings_from_profile(profile, args.symbol, wallet)
         source, destination = Path(args.recordings), Path(args.ledger)
@@ -40,16 +42,21 @@ def main():
         if (args.attach_buy or args.retry_claim) and not args.execute:
             raise ValueError("recovery actions require --execute")
         # One process per wallet on this host, even across different ledger paths.
+        stage = "wallet process lock (another runner may be active)"
         lock_path = Path(tempfile.gettempdir()) / f"9live-{os.getuid()}-{wallet}.lock"
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         lock = os.fdopen(fd, "w")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stage = "ledger (check path, permissions and wallet/ledger identity)"
         destination.parent.mkdir(parents=True, exist_ok=True)
         ledger = Ledger(str(destination), settings)
+        stage = "credentials and live limits"
         broker = LiveBroker(ledger, profile, args.symbol)
+        stage = "read-only Arbitrum preflight"
         print(json.dumps({"preflight": broker.preflight(), "execute": args.execute}), flush=True)
         if not args.execute:
             return
+        stage = "live execution/recovery"
         if args.attach_buy:
             broker.attach_buy(*args.attach_buy)
         if args.retry_claim:
@@ -83,9 +90,11 @@ def main():
             time.sleep(2)
     except KeyboardInterrupt:
         pass
+    except SetupError as exc:
+        parser.exit(2, f"Live runner stopped: {exc}. Do not delete pending positions.\n")
     except Exception as exc:
         # Never dump HTTP errors, environment values, signer objects or raw requests.
-        parser.exit(2, f"Live runner stopped ({type(exc).__name__}). Check config, credentials, balances, lock and ledger; do not delete pending positions.\n")
+        parser.exit(2, f"Live runner stopped during {stage} ({type(exc).__name__}). Do not delete pending positions.\n")
     finally:
         if ledger:
             ledger.close()

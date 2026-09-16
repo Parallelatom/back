@@ -25,7 +25,9 @@ mkdir -p data
 
 Fill these locally with an editor (never paste secrets into chat or shell history):
 
-- `execution-accounts.json`: BTC and XYZCL public addresses; they must be different.
+- `execution-accounts.json`: public address of each Symbol you use. When running only
+  XYZCL, leave BTC disabled with an empty address. If both addresses are filled, they must
+  be different. A selected or enabled Symbol always needs a valid public address.
 - `execution-secrets.env`: full `NINELIVES_BTC_AUTHORIZATION` and
   `NINELIVES_XYZCL_AUTHORIZATION`, without adding `Bearer`; also each wallet's
   `NINELIVES_BTC_PRIVATE_KEY` / `NINELIVES_XYZCL_PRIVATE_KEY` for claiming.
@@ -43,7 +45,15 @@ bash run-live.sh BTC
 Preflight checks chain ID, token decimals, required contract code, EOA type, balances and
 signer/address agreement. It does not send Authorization or sign a transaction. It creates
 an empty live ledger bound to that wallet and Symbol. Only the selected wallet's secrets
-need be filled; both public addresses must be configured.
+need be filled; an unused disabled Symbol may have a blank public address.
+
+Preflight errors use safe diagnostic codes: `CONFIG_ADDRESS_XYZCL` means an invalid/missing
+public address, `PRIVATE_KEY_MISSING`/`PRIVATE_KEY_INVALID` means the selected signing key is
+missing/malformed, `PRIVATE_KEY_MISMATCH` means it belongs to another wallet, and
+`AUTHORIZATION_MISSING` means the selected Authorization variable is empty/invalid.
+`RPC_REQUEST` means the RPC rejected a request or was unreachable. These messages do not
+print supplied values. Other failures identify the stage (configuration, lock, ledger,
+credentials, RPC or execution). Do not delete a live ledger to clear an error.
 
 To run real money, set `enabled: true` for the chosen profile and deliberately set
 `accept_unprotected_slippage: true`: the observed Accounts `Mint` input does not offer a
