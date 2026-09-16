@@ -147,8 +147,8 @@ class LiveBroker:
         spent = sum(p["amount"] for p in positions if p["state"] not in ("EXPIRED", "BUY_REJECTED"))
         loss = sum(max(0, p["cost"] - p["payout"]) for p in positions if p["state"] in ("LOST", "REDEEMED"))
         return {"started_at": row["started_at"], "ends_at": row["ends_at"],
-                "attempts": len(positions), "max_trades": 10, "committed_micro": spent,
-                "budget_micro": 10_000_000, "loss_micro": loss, "loss_limit_micro": 2_000_000}
+                "attempts": len(positions), "max_trades": None, "committed_micro": spent,
+                "budget_micro": None, "initial_bankroll_micro": 10_000_000, "loss_micro": loss, "loss_limit_micro": 2_000_000}
 
     def preflight(self):
         if self.rpc.call("eth_chainId", []) != "0xa4b1":
@@ -186,10 +186,6 @@ class LiveBroker:
         if session:
             if time.time() >= session["ends_at"]:
                 return "overnight entry deadline reached"
-            if session["attempts"] >= session["max_trades"]:
-                return "overnight trade limit reached"
-            if session["committed_micro"] + 1_000_000 > session["budget_micro"]:
-                return "overnight spend limit reached"
             if session["loss_micro"] >= session["loss_limit_micro"]:
                 return "overnight loss limit reached"
             return None

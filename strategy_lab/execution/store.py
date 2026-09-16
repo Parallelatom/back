@@ -126,7 +126,14 @@ class Ledger:
                 return "exposure limit"
             if cash < intent["amount"]:
                 return "insufficient paper cash"
-            if spend + intent["amount"] > settings.daily_spend:
+            # A persisted timed LIVE session recycles confirmed proceeds. Keep the
+            # cash/exposure/loss guards; paper and untimed trials retain daily spend.
+            timed_live = (settings.mode == "live" and self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='overnight_session'"
+            ).fetchone() is not None and self.conn.execute(
+                "SELECT 1 FROM overnight_session WHERE id=1"
+            ).fetchone() is not None)
+            if not timed_live and spend + intent["amount"] > settings.daily_spend:
                 return "daily spend limit"
             if loss >= settings.daily_loss:
                 return "daily loss limit"

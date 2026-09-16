@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--watch", action="store_true")
     deadline = parser.add_mutually_exclusive_group()
     deadline.add_argument("--overnight-hours", type=int, choices=range(1, 13), metavar="1..12",
-                        help="start/resume a durable overnight session (10 USDC, 10 attempts, 2 USDC loss stop)")
+                        help="start/resume a durable overnight session (10 USDC initial bankroll, recycled proceeds, 2 USDC loss stop)")
     deadline.add_argument("--until", help="stop new entries at ISO date/time WITH offset, e.g. 2026-09-17T09:00:00+07:00")
     parser.add_argument("--log-format", choices=("text", "json"), default="text")
     parser.add_argument("--log-timezone", default="Asia/Bangkok")

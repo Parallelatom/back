@@ -423,17 +423,32 @@ def test_overnight_counts_new_attempts_and_persists_across_restart(rig, monkeypa
         other.close()
 
 
-def test_overnight_total_budget_does_not_reset_at_utc_midnight(rig, monkeypatch):
+def test_overnight_recycles_over_ten_buys_across_midnight(rig, monkeypatch):
     midnight = (NOW // 86400 + 1) * 86400
     monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: midnight - 3600)
     rig.broker.start_overnight(8)
-    for i in range(10):
-        at = midnight - 1 if i < 5 else midnight + 1
+    for i in range(12):
+        at = midnight - 1 if i < 11 else midnight + 1
         monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: at)
         assert rig.broker.entry_block() is None
         add_closed(rig, i, at)
-    assert rig.broker.overnight_status()["committed_micro"] == 10000000
-    assert rig.broker.entry_block() == "overnight trade limit reached"
+    assert rig.broker.overnight_status()["committed_micro"] == 12000000
+    assert rig.broker.entry_block() is None
+    assert rig.broker.overnight_status()["max_trades"] is None
+    other = Ledger(rig.path, rig.settings)
+    try:
+        resumed = LiveBroker(other, rig.profile, "BTC", rig.rpc, rig.account)
+        assert resumed.entry_block() is None
+        assert resumed.overnight_status()["attempts"] == 12
+    finally:
+        other.close()
+
+
+def test_untimed_live_retains_daily_spend_limit(rig):
+    for i in range(10):
+        add_closed(rig, i, NOW)
+    with pytest.raises(AssertionError, match="daily spend limit"):
+        add_closed(rig, 11, NOW)
 
 
 def test_overnight_loss_stop_does_not_reset_at_midnight(rig, monkeypatch):

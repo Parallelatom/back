@@ -46,8 +46,6 @@ def explain(reason, market):
         "new entries disabled": "ปิดซื้อใหม่ / มีไฟล์ HALT",
         "configured lifetime trade count reached": "ครบจำนวนรอบทดลอง — ยังติดตามสถานะ/claim ต่อ",
         "overnight entry deadline reached": "ครบเวลาค้างคืน — หยุดซื้อใหม่ แต่ยังติดตาม/claim ต่อ",
-        "overnight trade limit reached": "ครบ 10 ครั้งของค้างคืนนี้ — ยังติดตาม/claim ต่อ",
-        "overnight spend limit reached": "ครบวงเงินซื้อ 10 USDC ของค้างคืนนี้ — ยังติดตาม/claim ต่อ",
         "overnight loss limit reached": "ถึงขีดจำกัดขาดทุน 2 USDC ของค้างคืนนี้ — ยังติดตาม/claim ต่อ",
         "already recorded": "รอบนี้บันทึกคำสั่งแล้ว — ไม่ส่งซื้อซ้ำ",
         "no live Round recorded": "รอข้อมูลรอบจาก Collector",
@@ -103,7 +101,7 @@ class LiveLog:
         session_key = json.dumps(session, sort_keys=True)
         if session and self.session_key != session_key:
             end = datetime.fromtimestamp(session["ends_at"], self.timezone).strftime("%Y-%m-%d %H:%M:%S")
-            self.emit(f"{prefix} OVERNIGHT | หยุดซื้อ {end} | ครั้ง {session['attempts']}/10 | ใช้/กันไว้ {session['committed_micro']/1e6:.2f}/10.00 USDC | ขาดทุน {session['loss_micro']/1e6:.2f}/2.00 | หลังครบเวลายัง claim ต่อ")
+            self.emit(f"{prefix} OVERNIGHT | หยุดซื้อ {end} | ครั้ง {session['attempts']} (ไม่จำกัด) | ซื้อสะสม {session['committed_micro']/1e6:.2f} USDC | ทุนตั้งต้น 10 USDC หมุนเงิน claim ยืนยันแล้ว | ขาดทุน {session['loss_micro']/1e6:.2f}/2.00 | หลังครบเวลายัง claim ต่อ")
             self.session_key = session_key
         if market:
             if self.round != market["round_end"]:

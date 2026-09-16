@@ -39,11 +39,15 @@ slippage acknowledgement; the command does not edit credentials or config.
 
 `--until` requires a timezone offset and a new deadline within the next 24 hours. Alternatively,
 `--overnight-hours 8` starts an eight-hour run. Timed mode overrides the old lifetime
-`max_trades: 1` with **up to 10 new intents, at most 10 USDC total committed buy spend,
-and a 2 USDC gross realized-loss stop for this session**, per wallet. Daily limits remain
-as additional restrictions. A completed earlier trial is excluded from the timed session;
-an outstanding earlier position must still finish before another can open. Only one position
-is open at a time. Finality delays, skips and limits mean far fewer than 10 trades may occur.
+`max_trades: 1` and daily cumulative spend cap with **unlimited attempts and cumulative
+buy spend until the deadline, recycling confirmed claim proceeds from the 10 USDC initial
+bankroll**. A **2 USDC gross realized-loss stop** persists for the whole session; the daily
+loss limit also remains. Cash, live wallet balance, and exposure checks still apply. A
+completed earlier trial is excluded from session loss totals; an outstanding earlier
+position must still finish before another can open. Only one position is open at a time.
+Finality delays, skips, insufficient funds or the loss stop can prevent trades before 09:00.
+Existing saved timed sessions adopt this policy on upgrade without resetting their deadline
+or loss history. Untimed trials and paper runners retain their existing spend/count limits.
 Gas is separate from the USDC budget; every claim still has its configured gas ceiling.
 
 Session baseline, start and deadline are durable. Neither restart nor UTC midnight resets
@@ -127,7 +131,7 @@ bash run-live.sh BTC --execute --watch
 ```
 
 Both `--execute` and `enabled: true` are needed for buying. `--execute` also allows outstanding
-claims even with entries disabled. Defaults are 1 USDC per Round, initial budget 10 USDC,
+claims even with entries disabled. Untimed trial defaults are 1 USDC per Round, initial budget 10 USDC,
 one open position, daily spend 10 USDC, daily realized loss stop 2 USDC, and `max_trades: 1`
 for the first full-cycle test. `max_trades` counts positions over the entire ledger lifetime,
 including uncertain/expired attempts; set up to 10 after review without deleting the ledger.
