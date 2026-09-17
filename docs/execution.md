@@ -266,7 +266,7 @@ Default limits are one open position per wallet, at most 10 USD spent per
 UTC day, stop new entries after 2 USD of realized losing results that day, and 1% simulated
 quote slippage. Review these limits before enabling the live profile.
 Cash may exceed the initial 10 USD after simulated profits; no additional funding is added.
-Positions with ambiguous submissions continue to reserve funds and occupy the position limit.
+Positions with ambiguous buy responses reserve funds; BUY_UNKNOWN no longer occupies the normal entry slot. Other pending states still occupy it.
 
 ## Run locally
 
@@ -427,3 +427,28 @@ continuous mode on a fresh ledger creates no overnight report window. This relea
 comparison command still targets the original timed window, not arbitrary continuous dates.
 Do not combine --continuous with --until or --overnight-hours. Once continuous mode is
 saved, omitting the flag resumes it; use HALT to stop new entries.
+
+
+### API failures and skipped Rounds
+
+Timeout, network failure, non-200 HTTP, or a response without a valid hash becomes
+`BUY_UNKNOWN`. The Round is never submitted again, including after restart. Logs contain
+only a local error code / numeric HTTP status, never response bodies or Authorization.
+The next eligible Round may trade while the unknown 1 USDC remains reserved against cash
+and exposure. At 2 USDC of unknown buys, new entries pause pending reconciliation; loss,
+wallet, share-floor and other controls remain. A late-confirmed purchase can temporarily
+coexist with the next position; both are reconciled/claimed and new entries then wait.
+
+Before the POST, the runner durably records a starting block. Once per minute per unknown
+buy, it scans incoming share transfers from that block in chunks and attaches only a hash
+whose canonical receipt validates the exact pool/outcome, recipient and USDC/share amounts.
+If no shares were received, the Round has expired and the chain is finalized beyond
+end+5 minutes, and no outgoing wallet USDC debit during the submission-to-end+5-minute window or current share balance exists, the runner
+marks EXPIRED and releases the reservation. Finality is used only for this absence check,
+not normal successful buys/claims. RPC errors, multiple candidates, debits without a valid
+share receipt or inconsistent evidence never release cash automatically.
+
+Recovery scans are bounded to 20,000 blocks from the saved starting block. Longer outages
+and legacy no-hash records created before this upgrade (no starting block) require manual
+reconciliation/attach. They remain reserved. The latest runner migrates old BUY_PENDING
+records with a buy-operation marker but no hash to BUY_UNKNOWN without reposting.

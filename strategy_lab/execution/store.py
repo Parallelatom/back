@@ -85,6 +85,11 @@ class Ledger:
     def active(self):
         return [p for p in self.positions() if p["state"] not in TERMINAL]
 
+    def entry_active(self):
+        # Unknown API responses keep cash/exposure reserved but do not occupy the
+        # normal entry slot. Late-confirmed purchases become active positions again.
+        return [p for p in self.active() if p["state"] != "BUY_UNKNOWN"]
+
     def transition(self, identity, expected, state, now, **fields):
         allowed = {"shares", "cost", "payout", "buy_ref", "redeem_ref", "winner", "error"}
         if not set(fields) <= allowed:
@@ -120,7 +125,7 @@ class Ledger:
                         and p["state"] not in ("BUY_REJECTED", "EXPIRED"))
             loss = sum(max(0, p["cost"] - p["payout"]) for p in all_positions
                        if p["updated_at"] >= day and p["state"] in TERMINAL)
-            if len(active) >= settings.max_open_positions:
+            if len([p for p in active if p["state"] != "BUY_UNKNOWN"]) >= settings.max_open_positions:
                 return "open-position limit"
             if sum(p["amount"] for p in active) + intent["amount"] > settings.max_exposure:
                 return "exposure limit"

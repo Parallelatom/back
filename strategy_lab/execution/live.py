@@ -1,7 +1,7 @@
 """Accounts API buy + locally signed Arbitrum payoff, with durable at-most-once intent.
 
 Only the explicit live CLI constructs this adapter. HTTP acknowledgements never credit
-cash. Unknown API submissions block the Round until an operator attaches a proven hash.
+cash. Unknown API submissions skip their Round while retaining funds for reconciliation.
 """
 import json
 import os
@@ -16,7 +16,7 @@ from eth_utils import keccak, to_checksum_address
 from .accounts import (CLAIMANT, ENDPOINT, USDC, ZERO, address, claim_transaction,
                        hex_value, inspect_receipt, mint_hash, mint_payload)
 from .config import Settings
-from .errors import SetupError, NotSubmitted
+from .errors import SetupError, NotSubmitted, BuyUncertain
 from .paper import Quote, Receipt
 
 
@@ -100,12 +100,15 @@ class LiveBroker:
             raise SetupError("CONFIG_MAX_TRADES: max_trades must be an integer 1..10 per ledger")
         if type(self.gas_cap) is not int or not 0 < self.gas_cap <= 10**15:
             raise SetupError("CONFIG_GAS_CAP: claim gas cap must be a positive integer at most 1000000000000000 wei")
+        self.recovery_checks = {}
         ledger.conn.executescript("""
             CREATE TABLE IF NOT EXISTS live_ops (
                 position_id TEXT NOT NULL, operation TEXT NOT NULL,
                 request TEXT NOT NULL, tx_hash TEXT UNIQUE, raw_tx TEXT,
                 share_token TEXT NOT NULL, outcome_up TEXT, outcome_down TEXT,
                 gas_wei INTEGER, PRIMARY KEY(position_id,operation));
+            CREATE TABLE IF NOT EXISTS buy_recovery (
+                position_id TEXT PRIMARY KEY, from_block INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS live_flags (name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS overnight_session (
                 id INTEGER PRIMARY KEY CHECK(id=1), started_at INTEGER NOT NULL,
@@ -195,6 +198,9 @@ class LiveBroker:
         row = self.ledger.conn.execute("SELECT value FROM live_flags WHERE name='halt'").fetchone()
         if row:
             return row[0]
+        unknown = [p for p in self.ledger.active() if p["state"] == "BUY_UNKNOWN" and p["id"] != exclude_id]
+        if sum(p["amount"] for p in unknown) >= 2_000_000:
+            return "unknown buy exposure limit reached"
         session = self.overnight_status(exclude_id)
         if session:
             if not session["continuous"] and time.time() >= session["ends_at"]:
@@ -258,9 +264,18 @@ class LiveBroker:
                 or not snapshot.record.prices
                 or time.time() - snapshot.record.prices[-1][0] > 15):
             raise NotSubmitted("market observations expired before submission")
+        try:
+            from_block = int(self.rpc.call("eth_blockNumber", []), 16)
+        except Exception:
+            raise NotSubmitted("cannot capture recovery block before API submission") from None
+        if (time.time() - position["created_at"] > 5 or position["ending"] - time.time() < 75
+                or time.time() - snapshot.metadata_at > 15
+                or time.time() - snapshot.record.prices[-1][0] > 15):
+            raise NotSubmitted("timing expired while capturing recovery block")
         payload = mint_payload(position["pool"], position["outcome"], int(time.time() * 1000))
         # Durable marker before HTTP. No transport retry and no redirect with credentials.
         with self.ledger.conn:
+            self.ledger.conn.execute("INSERT INTO buy_recovery VALUES (?,?)", (position["id"], from_block))
             self.ledger.conn.execute("INSERT INTO live_ops(position_id,operation,request,share_token,outcome_up,outcome_down) VALUES (?,'buy',?,?,?,?)",
                 (position["id"], json.dumps(payload), share, hex_value(snapshot.outcome_up, 8), hex_value(snapshot.outcome_down, 8)))
         try:
@@ -268,16 +283,77 @@ class LiveBroker:
                 "Content-Type": "application/json", "Origin": "https://www.9lives.so",
                 "Referer": "https://www.9lives.so/"}, timeout=20, allow_redirects=False)
             if response.status_code != 200:
-                raise ValueError()
-            tx = mint_hash(response.json())
-        except (requests.RequestException, ValueError):
-            raise ValueError("buy acknowledgement unknown; do not resend") from None
+                raise BuyUncertain(f"BUY_HTTP_{int(response.status_code)}: skipped Round; funds reserved for chain reconciliation")
+            try:
+                tx = mint_hash(response.json())
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise BuyUncertain("BUY_RESPONSE_NO_HASH: skipped Round; funds reserved for chain reconciliation") from None
+        except requests.Timeout:
+            raise BuyUncertain("BUY_TIMEOUT: skipped Round; funds reserved for chain reconciliation") from None
+        except requests.RequestException:
+            raise BuyUncertain("BUY_NETWORK: skipped Round; funds reserved for chain reconciliation") from None
         with self.ledger.conn:
             self.ledger.conn.execute("UPDATE live_ops SET tx_hash=? WHERE position_id=? AND operation='buy'",
                                      (tx, position["id"]))
 
     def lookup_buy(self, position):
+        op = self.op(position, "buy")
+        if op and not op["tx_hash"]:
+            if position["state"] == "BUY_PENDING":
+                self.ledger.transition(position["id"], "BUY_PENDING", "BUY_UNKNOWN", int(time.time()),
+                    error="BUY_ACK_UNKNOWN: skipped Round; funds reserved for chain reconciliation")
+                return None
+            self.recover_unknown_buy(position, op)
         return self._receipt(position, "buy")
+
+    def recover_unknown_buy(self, position, op):
+        now = int(time.time())
+        if now - self.recovery_checks.get(position["id"], 0) < 60:
+            return
+        self.recovery_checks[position["id"]] = now
+        marker = self.ledger.conn.execute("SELECT from_block FROM buy_recovery WHERE position_id=?",
+                                          (position["id"],)).fetchone()
+        if not marker:
+            return  # Legacy ambiguity retains its reservation; explicit attach is supported.
+        head = self.rpc.call("eth_getBlockByNumber", ["latest", False])
+        end = int(head["number"], 16)
+        start = marker[0]
+        # Bound the read. After an extended outage require operator reconciliation.
+        if end < start or end - start > 20000:
+            return
+        hashes = set()
+        for low in range(start, end + 1, 2000):
+            logs = self.rpc.call("eth_getLogs", [{"address": op["share_token"],
+                "fromBlock": hex(low), "toBlock": hex(min(low + 1999, end)),
+                "topics": ["0x" + keccak(text="Transfer(address,address,uint256)").hex(),
+                           None, "0x" + self.wallet[2:].rjust(64, "0")]}])
+            hashes.update(hex_value(log["transactionHash"], 32) for log in logs if not log.get("removed"))
+        if len(hashes) == 1:
+            self.attach_buy(position["id"], hashes.pop())
+            return
+        if hashes:
+            return  # Multiple candidates require explicit review.
+        # Only release a missing purchase once the chain has finalized beyond the
+        # expired Round and both share receipts and wallet USDC debits are absent.
+        final = self.rpc.call("eth_getBlockByNumber", ["finalized", False])
+        if int(final["timestamp"], 16) < position["ending"] + 300 or int(final["number"], 16) > end:
+            return
+        for low in range(start, end + 1, 2000):
+            debits = self.rpc.call("eth_getLogs", [{"address": USDC,
+                "fromBlock": hex(low), "toBlock": hex(min(low + 1999, end)),
+                "topics": ["0x" + keccak(text="Transfer(address,address,uint256)").hex(),
+                           "0x" + self.wallet[2:].rjust(64, "0")]}])
+            for debit in debits:
+                if "blockNumber" not in debit:
+                    return
+                block = self.rpc.call("eth_getBlockByNumber", [debit["blockNumber"], False])
+                if int(block["timestamp"], 16) <= position["ending"] + 300:
+                    return
+        if self.balance(op["share_token"]) != 0:
+            return
+        self.ledger.transition(position["id"], "BUY_UNKNOWN", "EXPIRED", now,
+            error="BUY_NOT_OBSERVED: expired Round; no share receipts or wallet USDC debits during expired Round")
+
 
     def settlement(self, position, now):
         if now < position["ending"] + 300:
@@ -380,7 +456,7 @@ class LiveBroker:
 
     def attach_buy(self, identity, tx_hash):
         position = self.ledger.get(identity)
-        if not position or position["state"] != "BUY_PENDING":
+        if not position or position["state"] not in ("BUY_PENDING", "BUY_UNKNOWN"):
             raise ValueError("expected a pending buy")
         op = self.op(position, "buy")
         if not op or op["tx_hash"]:

@@ -68,6 +68,9 @@ class FakeRPC:
         raise AssertionError(signature)
 
     def call(self, method, params):
+        if method == "eth_blockNumber": return "0x100"
+        if method == "eth_getBlockByNumber": return {"number": "0x100", "timestamp": hex(NOW)}
+        if method == "eth_getLogs": return []
         if method == "eth_chainId": return "0xa4b1"
         if method == "eth_getCode": return "0x" if params[0] not in (USDC, CLAIMANT) else "0x1234"
         if method == "eth_getBalance": return hex(10**17)
@@ -165,7 +168,7 @@ def test_unknown_api_ack_never_reposts_and_can_attach_verified_hash(rig, monkeyp
     for _ in range(3):
         engine.enter(rig.snapshot, NOW)
         engine.advance(NOW, rig.broker.settlement)
-    assert len(calls) == 1 and rig.ledger.get(p["id"])["state"] == "BUY_PENDING"
+    assert len(calls) == 1 and rig.ledger.get(p["id"])["state"] == "BUY_UNKNOWN"
     assert "sensitive" not in rig.ledger.get(p["id"])["error"]
     rig.rpc.receipts[BUY_HASH] = receipt(rig.broker.wallet, BUY_HASH, "buy")
     rig.broker.attach_buy(p["id"], BUY_HASH)
@@ -619,3 +622,102 @@ def test_continuous_trades_do_not_leak_into_overnight_comparison(rig, monkeypatc
     monkeypatch.setattr(compare, 'replay', lambda *a, **k: {'Delta Edge': SimpleNamespace(trades=[])})
     report = compare.compare(rig.ledger.conn, None, 'BTC')
     assert report['live_attempts'] == 1
+
+
+@pytest.mark.parametrize('failure,code', [('timeout','BUY_TIMEOUT'), ('http','BUY_HTTP_401'), ('missing','BUY_RESPONSE_NO_HASH')])
+def test_api_failures_skip_round_keep_cash_and_allow_next_slot(rig, monkeypatch, failure, code):
+    def post(*a, **k):
+        if failure == 'timeout':
+            raise requests.Timeout('SECRET')
+        return SimpleNamespace(status_code=401 if failure == 'http' else 200,
+                               json=lambda: {'errors': [{'message': 'SECRET'}]})
+    monkeypatch.setattr('strategy_lab.execution.live.requests.post', post)
+    rig.broker.start_continuous()
+    engine = Executor(rig.settings, rig.ledger, rig.broker)
+    assert engine.enter(rig.snapshot, NOW) == 'BUY_UNKNOWN'
+    p = rig.ledger.positions()[0]
+    assert code in p['error'] and 'SECRET' not in p['error']
+    assert rig.ledger.summary(rig.settings)['reserved_usd'] == 1
+    assert not rig.ledger.entry_active()
+    assert rig.broker.entry_block() is None
+    assert engine.enter(rig.snapshot, NOW) == 'already recorded'
+    # A different Round can reserve while the unknown amount remains reserved.
+    intent = {k: p[k] for k in ('symbol','pool','outcome','side','strategy','amount','minimum_shares','quoted_shares')}
+    intent.update(id='next-round', ending=END+900)
+    assert rig.ledger.reserve(intent, rig.settings, NOW) == 'reserved'
+    assert rig.ledger.summary(rig.settings)['reserved_usd'] == 2
+
+
+def test_unknown_timeout_discovers_mined_buy_after_restart_without_repost(rig, monkeypatch):
+    def post(*a, **k): raise requests.Timeout()
+    monkeypatch.setattr('strategy_lab.execution.live.requests.post', post)
+    engine = Executor(rig.settings, rig.ledger, rig.broker)
+    engine.enter(rig.snapshot, NOW)
+    identity = rig.ledger.positions()[0]['id']
+    rig.rpc.receipts[BUY_HASH] = receipt(rig.broker.wallet, BUY_HASH, 'buy')
+    original = rig.rpc.call
+    def call(method, params):
+        if method == 'eth_getLogs': return [{'transactionHash': BUY_HASH, 'removed': False}]
+        return original(method, params)
+    monkeypatch.setattr(rig.rpc, 'call', call)
+    other = Ledger(rig.path, rig.settings)
+    try:
+        broker = LiveBroker(other, rig.profile, 'BTC', rig.rpc, rig.account)
+        Executor(rig.settings, other, broker).advance(NOW, broker.settlement)
+        assert other.get(identity)['state'] == 'OPEN'
+        assert other.get(identity)['shares'] == 1314422
+    finally:
+        other.close()
+
+
+def test_unknown_empty_chain_releases_only_after_expired_round_finality(rig, monkeypatch):
+    def post(*a, **k): raise requests.Timeout()
+    monkeypatch.setattr('strategy_lab.execution.live.requests.post', post)
+    engine = Executor(rig.settings, rig.ledger, rig.broker)
+    engine.enter(rig.snapshot, NOW)
+    identity = rig.ledger.positions()[0]['id']
+    engine.advance(NOW, rig.broker.settlement)
+    assert rig.ledger.get(identity)['state'] == 'BUY_UNKNOWN'
+    original = rig.rpc.call
+    def call(method, params):
+        if method == 'eth_getBlockByNumber': return {'number': '0x101', 'timestamp': hex(END+301)}
+        return original(method, params)
+    monkeypatch.setattr(rig.rpc, 'call', call)
+    monkeypatch.setattr('strategy_lab.execution.live.time.time', lambda: END+301)
+    engine.advance(END+301, rig.broker.settlement)
+    assert rig.ledger.get(identity)['state'] == 'EXPIRED'
+    assert rig.ledger.summary(rig.settings)['reserved_usd'] == 0
+
+
+def test_two_unknown_buys_pause_new_entries_and_preserve_cash(rig, monkeypatch):
+    def post(*a, **k): raise requests.Timeout()
+    monkeypatch.setattr('strategy_lab.execution.live.requests.post', post)
+    rig.broker.start_continuous()
+    Executor(rig.settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
+    p = rig.ledger.positions()[0]
+    intent = {k: p[k] for k in ('symbol','pool','outcome','side','strategy','amount','minimum_shares','quoted_shares')}
+    intent.update(id='another-unknown', ending=END+900)
+    assert rig.ledger.reserve(intent, rig.settings, NOW) == 'reserved'
+    rig.ledger.transition('another-unknown', 'BUY_READY', 'BUY_UNKNOWN', NOW)
+    assert rig.broker.entry_block() == 'unknown buy exposure limit reached'
+    assert rig.ledger.summary(rig.settings)['reserved_usd'] == 2
+
+
+@pytest.mark.parametrize('fault', ['rpc', 'debit'])
+def test_unknown_cash_not_released_on_scan_failure_or_pool_debit(rig, monkeypatch, fault):
+    def post(*a, **k): raise requests.Timeout()
+    monkeypatch.setattr('strategy_lab.execution.live.requests.post', post)
+    engine = Executor(rig.settings, rig.ledger, rig.broker)
+    engine.enter(rig.snapshot, NOW)
+    original = rig.rpc.call
+    def call(method, params):
+        if method == 'eth_getBlockByNumber': return {'number':'0x101','timestamp':hex(END+301)}
+        if method == 'eth_getLogs':
+            if fault == 'rpc': raise ValueError('upstream failure')
+            if params[0]['address'] == USDC: return [{'transactionHash': BUY_HASH}]
+        return original(method, params)
+    monkeypatch.setattr(rig.rpc, 'call', call)
+    monkeypatch.setattr('strategy_lab.execution.live.time.time', lambda: END+301)
+    engine.advance(END+301, rig.broker.settlement)
+    assert rig.ledger.positions()[0]['state'] == 'BUY_UNKNOWN'
+    assert rig.ledger.summary(rig.settings)['reserved_usd'] == 1

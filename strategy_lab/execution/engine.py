@@ -9,7 +9,7 @@ import time
 
 from .paper import Quote, Receipt
 from .signals import decide
-from .errors import NotSubmitted
+from .errors import NotSubmitted, BuyUncertain
 
 
 class Executor:
@@ -66,6 +66,8 @@ class Executor:
         if self.ledger.transition(identity, "BUY_READY", "BUY_PENDING", now):
             try:
                 self.broker.submit_buy(self.ledger.get(identity), snapshot)
+            except BuyUncertain as exc:
+                self.ledger.transition(identity, "BUY_PENDING", "BUY_UNKNOWN", int(time.time()), error=str(exc))
             except NotSubmitted:
                 self.ledger.transition(identity, "BUY_PENDING", "EXPIRED", int(time.time()),
                                        error="buy cancelled before submission; no API request sent")
@@ -82,19 +84,20 @@ class Executor:
                 self.ledger.transition(identity, "BUY_READY", "EXPIRED", now,
                                        error="unsubmitted intent recovered; wait for a new Round")
                 continue
-            if position["state"] == "BUY_PENDING":
+            if position["state"] in ("BUY_PENDING", "BUY_UNKNOWN"):
+                pending_state = position["state"]
                 try:
                     receipt = self.broker.lookup_buy(position)
                 except Exception as exc:
-                    self._unknown(identity, "BUY_PENDING", now, exc)
+                    self._unknown(identity, pending_state, now, exc)
                     continue
                 if receipt is None:
                     continue
                 if not self._valid_receipt(receipt, "buy", position):
-                    self._unknown(identity, "BUY_PENDING", now, ValueError())
+                    self._unknown(identity, pending_state, now, ValueError())
                     continue
                 state = "OPEN" if receipt.success else "BUY_REJECTED"
-                self.ledger.transition(identity, "BUY_PENDING", state, now,
+                self.ledger.transition(identity, pending_state, state, now,
                                        shares=receipt.shares, cost=receipt.amount,
                                        buy_ref=receipt.reference, error=None)
                 position = self.ledger.get(identity)

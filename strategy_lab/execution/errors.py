@@ -7,3 +7,7 @@ class SetupError(ValueError):
 
 class NotSubmitted(ValueError):
     """A buy was refused before any API request; safe to release its reservation."""
+
+
+class BuyUncertain(ValueError):
+    """Safe local classification of a buy response whose execution is unknown."""
