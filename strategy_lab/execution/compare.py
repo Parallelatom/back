@@ -10,18 +10,24 @@ from ..db import connect_readonly
 from ..replay import DELTA_EDGE, replay
 
 
-def compare(live, recordings, symbol):
+def compare(live, recordings, symbol, started_at=None, ends_at=None):
     session = live.execute("SELECT * FROM overnight_session WHERE id=1").fetchone()
-    if not session:
+    if (started_at is None or ends_at is None) and not session:
         raise ValueError("no saved overnight session")
-    baseline = set(json.loads(session["baseline_ids"]))
+    if started_at is None:
+        started_at = session["started_at"]
+    if ends_at is None:
+        ends_at = session["ends_at"]
+    if type(started_at) is not int or type(ends_at) is not int or started_at >= ends_at:
+        raise ValueError("invalid comparison interval")
+    baseline = set(json.loads(session["baseline_ids"])) if session else set()
     live_positions = {p["ending"]: dict(p) for p in live.execute("SELECT * FROM positions WHERE symbol=?", (symbol,))
-                      if p["id"] not in baseline and session["started_at"] <= p["created_at"] < session["ends_at"]}
+                      if p["id"] not in baseline and started_at <= p["created_at"] < ends_at}
     # Exactly the original dashboard model, with its default quality filters. No live
     # share floor, gas, finality delay or one-position limit is added to that baseline.
     paper = replay(recordings, symbol, strategies=[DELTA_EDGE])["Delta Edge"]
     paper_trades = {p.round_ending: p for p in paper.trades
-                    if session["started_at"] <= p.entered_at < session["ends_at"]}
+                    if started_at <= p.entered_at < ends_at}
     rows = []
     for ending in sorted(set(live_positions) | set(paper_trades)):
         l, p = live_positions.get(ending), paper_trades.get(ending)
@@ -43,7 +49,7 @@ def compare(live, recordings, symbol):
     ids = {p["id"] for p in live_positions.values()}
     gas = sum(row["gas_wei"] or 0 for row in live.execute(
         "SELECT position_id,gas_wei FROM live_ops WHERE operation='redeem'") if row["position_id"] in ids)
-    return {"symbol": symbol, "started_at": session["started_at"], "ends_at": session["ends_at"],
+    return {"symbol": symbol, "started_at": started_at, "ends_at": ends_at,
             "live_attempts": len(live_positions),
             "live_closed": sum(p["state"] in ("REDEEMED", "LOST") for p in live_positions.values()),
             "live_realized_pnl_usdc": sum(r["live_realized_pnl_usdc"] or 0 for r in rows),
@@ -56,13 +62,27 @@ def main():
     parser.add_argument("--symbol", choices=("BTC", "XYZCL"), default="XYZCL")
     parser.add_argument("--ledger")
     parser.add_argument("--recordings", default="data/lab.db")
+    parser.add_argument("--from", dest="started_at", help="ISO start time with offset, e.g. 2026-09-17T09:00:00+07:00")
+    parser.add_argument("--to", dest="ends_at", help="ISO end time with offset; defaults to now when --from is set")
     parser.add_argument("--csv", help="optional .csv output; never a database path")
     args = parser.parse_args()
     try:
+        if bool(args.started_at) != bool(args.ends_at):
+            if not args.started_at:
+                raise ValueError("--from is required when --to is supplied")
+            args.ends_at = datetime.now(ZoneInfo("Asia/Bangkok")).isoformat()
+        def parse_time(value):
+            if value is None:
+                return None
+            parsed = datetime.fromisoformat(value)
+            if parsed.utcoffset() is None:
+                raise ValueError("time must include a timezone offset")
+            return int(parsed.timestamp())
+        started_at, ends_at = parse_time(args.started_at), parse_time(args.ends_at)
         with connect_readonly(args.ledger or f"data/live-{args.symbol}.db") as live, connect_readonly(args.recordings) as data:
             live.execute("BEGIN")
             data.execute("BEGIN")
-            result = compare(live, data, args.symbol)
+            result = compare(live, data, args.symbol, started_at, ends_at)
         zone = ZoneInfo("Asia/Bangkok")
         stamp = lambda ts: datetime.fromtimestamp(ts, zone).strftime("%m-%d %H:%M")
         print(f"{args.symbol} | {stamp(result['started_at'])} → {stamp(result['ends_at'])} เวลาไทย")

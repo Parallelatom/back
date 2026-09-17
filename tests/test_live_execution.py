@@ -516,6 +516,19 @@ def test_compare_pairs_paper_and_live_without_calling_pending_a_loss(rig, monkey
     assert report["live_closed"] == 0
 
 
+def test_compare_explicit_interval_includes_continuous_orders_only_in_that_interval(rig, monkeypatch):
+    from strategy_lab.execution import compare
+    from strategy_lab.replay import PaperTrade
+    rig.broker.start_until(NOW + 3600)
+    add_closed(rig, 0, NOW)
+    add_closed(rig, 1, NOW + 3601)
+    paper = PaperTrade(END + 900, NOW + 3601, "UP", 1314422, .5, .76, True, .314422)
+    monkeypatch.setattr(compare, "replay", lambda *a, **k: {"Delta Edge": SimpleNamespace(trades=[paper])})
+    report = compare.compare(rig.ledger.conn, None, "BTC", NOW + 3600, NOW + 7200)
+    assert report["live_attempts"] == report["paper_trades"] == 1
+    assert report["rows"][0]["live_entry_at"] == NOW + 3601
+
+
 def test_claim_waits_five_minutes_and_retries_unresolved_winner(rig, monkeypatch):
     engine, identity = buy(rig)
     rig.rpc.winner = bytes.fromhex(UP[2:])

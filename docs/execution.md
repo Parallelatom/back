@@ -62,6 +62,15 @@ At 09:00, compare with the original dashboard's **Delta Edge** model:
 .venv/bin/python -m strategy_lab.execution.compare --symbol XYZCL --csv data/XYZCL-night-comparison.csv
 ```
 
+For an arbitrary continuous-run interval, supply Bangkok timestamps with offsets. `--to`
+is optional and defaults to the current time:
+
+```sh
+.venv/bin/python -m strategy_lab.execution.compare --symbol XYZCL \
+  --from '2026-09-17T09:00:00+07:00' \
+  --csv data/XYZCL-after-0900.csv
+```
+
 The read-only report pairs by Round, showing sides, actual/model shares, state, realized
 USDC PnL and separately confirmed claim gas in ETH. The CSV also includes entry times and
 whether the paper model's shares would exceed 1.30. The dashboard baseline keeps its normal
