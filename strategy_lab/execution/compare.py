@@ -16,7 +16,7 @@ def compare(live, recordings, symbol):
         raise ValueError("no saved overnight session")
     baseline = set(json.loads(session["baseline_ids"]))
     live_positions = {p["ending"]: dict(p) for p in live.execute("SELECT * FROM positions WHERE symbol=?", (symbol,))
-                      if p["id"] not in baseline}
+                      if p["id"] not in baseline and session["started_at"] <= p["created_at"] < session["ends_at"]}
     # Exactly the original dashboard model, with its default quality filters. No live
     # share floor, gas, finality delay or one-position limit is added to that baseline.
     paper = replay(recordings, symbol, strategies=[DELTA_EDGE])["Delta Edge"]

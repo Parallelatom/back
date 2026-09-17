@@ -31,6 +31,7 @@ def main():
     deadline = parser.add_mutually_exclusive_group()
     deadline.add_argument("--overnight-hours", type=int, choices=range(1, 13), metavar="1..12",
                         help="start/resume a durable overnight session (10 USDC initial bankroll, recycled proceeds, 2 USDC loss stop)")
+    deadline.add_argument("--continuous", action="store_true", help="persist continuous mode without resetting risk limits or existing positions")
     deadline.add_argument("--until", help="stop new entries at ISO date/time WITH offset, e.g. 2026-09-17T09:00:00+07:00")
     parser.add_argument("--log-format", choices=("text", "json"), default="text")
     parser.add_argument("--log-timezone", default="Asia/Bangkok")
@@ -70,8 +71,10 @@ def main():
         if not args.execute:
             return
         stage = "live execution/recovery"
-        if (args.overnight_hours is not None or args.until is not None) and not settings.enabled:
+        if (args.continuous or args.overnight_hours is not None or args.until is not None) and not settings.enabled:
             raise SetupError("OVERNIGHT_DISABLED: enable the selected Symbol before starting the timed session")
+        if args.continuous:
+            broker.start_continuous()
         if args.overnight_hours is not None:
             broker.start_overnight(args.overnight_hours)
         if args.until is not None:

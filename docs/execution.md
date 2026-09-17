@@ -393,3 +393,37 @@ change, and this runner does not automatically roll back terminal ledger entries
 later reorg. Restart preserves existing signed claims and never
 signs them again. Simulation/gas/nonce failures before signing remain pending for inspection
 and explicit retry; unresolved winners alone are polled automatically.
+
+### Continuous operation
+
+Stop the old live process, then use the SAME ledger/config:
+
+```sh
+nohup bash run-live.sh XYZCL --execute --watch --continuous >> data/XYZCL-night.log 2>&1 &
+```
+
+Continuous mode persists across restarts and removes only the entry deadline. It keeps
+1 USDC stakes, strict quote >1.30, one active position, latest canonical receipt checks,
+end+5-minute claim eligibility, wallet/gas checks and all existing halts. Confirmed
+proceeds can be recycled without an attempt/cumulative-spend cap. The 2 USDC gross
+realized-loss stop stays cumulative across the original session and continuous operation:
+it does NOT reset on restart or midnight. Daily loss protection also remains. This is
+not a guarantee of trading indefinitely; risk halts still stop entries and allow claims.
+
+To stop new buys while claims finish:
+
+```sh
+touch data/HALT-XYZCL
+```
+
+After pending positions finish, find the selected runner with
+`pgrep -af 'strategy_lab.execution.run_live'` and send its PID `kill -TERM <PID>` to stop
+the process. Ctrl-C in `tail` stops only the log viewer. An existing halt file remains in
+effect when continuous mode is enabled. Do not delete the ledger to restart trading.
+
+Converting an existing timed session preserves its report start/end/baseline; the original
+comparison excludes later continuous orders, while risk counters include them. Starting
+continuous mode on a fresh ledger creates no overnight report window. This release's
+comparison command still targets the original timed window, not arbitrary continuous dates.
+Do not combine --continuous with --until or --overnight-hours. Once continuous mode is
+saved, omitting the flag resumes it; use HALT to stop new entries.

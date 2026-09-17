@@ -577,3 +577,45 @@ def test_mined_receipt_checks_canonical_block_without_finality(monkeypatch, cano
         assert result['_canonical_timestamp'] == NOW
     else:
         assert result is None
+
+
+def test_continuous_preserves_deadline_report_and_loss_across_restart(rig, monkeypatch):
+    session = rig.broker.start_until(NOW + 3600)
+    add_closed(rig, 0, NOW, lost=True)
+    rig.broker.start_continuous()
+    monkeypatch.setattr('strategy_lab.execution.live.time.time', lambda: NOW + 3601)
+    assert rig.broker.entry_block() is None
+    other = Ledger(rig.path, rig.settings)
+    try:
+        broker = LiveBroker(other, rig.profile, 'BTC', rig.rpc, rig.account)
+        assert broker.entry_block() is None
+        status = broker.start_continuous()
+        assert status['ends_at'] == session['ends_at']
+        assert status['loss_micro'] == 1000000
+        with pytest.raises(ValueError, match='CONTINUOUS_ACTIVE'):
+            broker.start_until(NOW + 3600)
+        add_closed(rig, 1, NOW + 3601, lost=True)
+        assert broker.entry_block() == 'overnight loss limit reached'
+    finally:
+        other.close()
+
+
+def test_new_continuous_session_recycles_and_preserves_halt(rig):
+    rig.broker.start_continuous()
+    for i in range(12):
+        assert rig.broker.entry_block() is None
+        add_closed(rig, i, NOW)
+    rig.broker.stop('manual review required')
+    rig.broker.start_continuous()
+    assert rig.broker.entry_block() == 'manual review required'
+
+
+def test_continuous_trades_do_not_leak_into_overnight_comparison(rig, monkeypatch):
+    from strategy_lab.execution import compare
+    rig.broker.start_until(NOW + 3600)
+    add_closed(rig, 0, NOW)
+    rig.broker.start_continuous()
+    add_closed(rig, 1, NOW + 3601)
+    monkeypatch.setattr(compare, 'replay', lambda *a, **k: {'Delta Edge': SimpleNamespace(trades=[])})
+    report = compare.compare(rig.ledger.conn, None, 'BTC')
+    assert report['live_attempts'] == 1

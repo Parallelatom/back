@@ -112,10 +112,21 @@ class LiveBroker:
                 ends_at INTEGER NOT NULL, baseline_ids TEXT NOT NULL);
         """)
 
+    def start_continuous(self):
+        # Preserve the original timed report window and every existing risk counter.
+        now = int(time.time())
+        with self.ledger.conn:
+            self.ledger.conn.execute("INSERT OR IGNORE INTO overnight_session VALUES (1,?,?,?)",
+                (now, now, json.dumps([p["id"] for p in self.ledger.positions()])))
+            self.ledger.conn.execute("INSERT OR REPLACE INTO live_flags VALUES ('continuous','1')")
+        return self.overnight_status()
+
     def start_overnight(self, hours):
         if type(hours) is not int or not 1 <= hours <= 12:
             raise SetupError("OVERNIGHT_HOURS: use an integer from 1 to 12")
         session = self.overnight_status()
+        if session and session["continuous"]:
+            raise SetupError("CONTINUOUS_ACTIVE: use the halt file to stop entries")
         if session:
             if session["ends_at"] - session["started_at"] != hours * 3600:
                 raise SetupError("OVERNIGHT_EXISTS: resume with the original duration; deadline cannot be extended")
@@ -124,6 +135,8 @@ class LiveBroker:
 
     def start_until(self, ends_at):
         session = self.overnight_status()
+        if session and session["continuous"]:
+            raise SetupError("CONTINUOUS_ACTIVE: stop entries with the halt file; timed flags cannot replace continuous mode")
         if session:
             if session["ends_at"] != ends_at:
                 raise SetupError("OVERNIGHT_EXISTS: resume the saved deadline; it cannot be extended")
@@ -145,7 +158,8 @@ class LiveBroker:
         positions = [p for p in self.ledger.positions() if p["id"] not in baseline and p["id"] != exclude_id]
         spent = sum(p["amount"] for p in positions if p["state"] not in ("EXPIRED", "BUY_REJECTED"))
         loss = sum(max(0, p["cost"] - p["payout"]) for p in positions if p["state"] in ("LOST", "REDEEMED"))
-        return {"started_at": row["started_at"], "ends_at": row["ends_at"],
+        return {"continuous": self.ledger.conn.execute("SELECT 1 FROM live_flags WHERE name='continuous' AND value='1'").fetchone() is not None,
+                "started_at": row["started_at"], "ends_at": row["ends_at"],
                 "attempts": len(positions), "max_trades": None, "committed_micro": spent,
                 "budget_micro": None, "initial_bankroll_micro": 10_000_000, "loss_micro": loss, "loss_limit_micro": 2_000_000}
 
@@ -183,7 +197,7 @@ class LiveBroker:
             return row[0]
         session = self.overnight_status(exclude_id)
         if session:
-            if time.time() >= session["ends_at"]:
+            if not session["continuous"] and time.time() >= session["ends_at"]:
                 return "overnight entry deadline reached"
             if session["loss_micro"] >= session["loss_limit_micro"]:
                 return "overnight loss limit reached"
