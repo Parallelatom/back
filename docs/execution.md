@@ -461,3 +461,20 @@ Recovery scans are bounded to 20,000 blocks from the saved starting block. Longe
 and legacy no-hash records created before this upgrade (no starting block) require manual
 reconciliation/attach. They remain reserved. The latest runner migrates old BUY_PENDING
 records with a buy-operation marker but no hash to BUY_UNKNOWN without reposting.
+
+### Analyse repeat buyers
+
+The buyer report is read-only: it uses Collector round metadata and Arbitrum `Transfer`
+logs to list addresses that received newly minted share tokens. It reports the transaction
+sender separately because an Accounts relayer may submit transactions for many recipients.
+Analyse at most three days per invocation to keep public RPC requests bounded:
+
+```bash
+.venv/bin/python -m strategy_lab.execution.buyers --symbol XYZCL \
+  --from '2026-09-17T18:00:00+07:00' --to '2026-09-18T09:00:00+07:00' \
+  --csv data/XYZCL-buyers.csv
+```
+
+`seconds_to_end` shows when each mint occurred relative to settlement. The live entry
+window is 300 through 75 seconds before settlement; a negative
+`relative_to_window_open_seconds` means the address bought before that window opened.
