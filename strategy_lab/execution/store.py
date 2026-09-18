@@ -123,8 +123,21 @@ class Ledger:
             day = now // 86400 * 86400
             spend = sum(p["amount"] for p in all_positions if p["created_at"] >= day
                         and p["state"] not in ("BUY_REJECTED", "EXPIRED"))
-            loss = sum(max(0, p["cost"] - p["payout"]) for p in all_positions
-                       if p["updated_at"] >= day and p["state"] in TERMINAL)
+            session = None
+            if settings.mode == "live" and self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='overnight_session'"
+            ).fetchone() is not None:
+                session = self.conn.execute(
+                    "SELECT baseline_ids FROM overnight_session WHERE id=1"
+                ).fetchone()
+            timed_live = session is not None
+            if timed_live:
+                baseline = set(json.loads(session["baseline_ids"]))
+                loss_positions = [p for p in all_positions if p["id"] not in baseline]
+            else:
+                loss_positions = [p for p in all_positions if p["updated_at"] >= day]
+            loss = sum(max(0, p["cost"] - p["payout"]) for p in loss_positions
+                       if p["state"] in TERMINAL)
             if len([p for p in active if p["state"] != "BUY_UNKNOWN"]) >= settings.max_open_positions:
                 return "open-position limit"
             if sum(p["amount"] for p in active) + intent["amount"] > settings.max_exposure:
@@ -133,11 +146,6 @@ class Ledger:
                 return "insufficient paper cash"
             # A persisted timed LIVE session recycles confirmed proceeds. Keep the
             # cash/exposure/loss guards; paper and untimed trials retain daily spend.
-            timed_live = (settings.mode == "live" and self.conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='overnight_session'"
-            ).fetchone() is not None and self.conn.execute(
-                "SELECT 1 FROM overnight_session WHERE id=1"
-            ).fetchone() is not None)
             if not timed_live and spend + intent["amount"] > settings.daily_spend:
                 return "daily spend limit"
             if loss >= settings.daily_loss:

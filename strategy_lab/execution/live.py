@@ -129,6 +129,22 @@ class LiveBroker:
             self.ledger.conn.execute("INSERT OR REPLACE INTO live_flags VALUES ('continuous','1')")
         return self.overnight_status()
 
+    def reset_risk_session(self):
+        """Start fresh loss/attempt counters without deleting execution history."""
+        session = self.overnight_status()
+        if not session or not session["continuous"]:
+            raise SetupError("RESET_SESSION_MODE: risk reset requires an existing continuous session")
+        if self.ledger.active():
+            raise SetupError("RESET_SESSION_ACTIVE: finish or reconcile every pending position before reset")
+        now = int(time.time())
+        baseline = json.dumps([p["id"] for p in self.ledger.positions()])
+        with self.ledger.conn:
+            self.ledger.conn.execute(
+                "UPDATE overnight_session SET started_at=?, ends_at=?, baseline_ids=? WHERE id=1",
+                (now, now, baseline),
+            )
+        return self.overnight_status()
+
     def start_overnight(self, hours):
         if type(hours) is not int or not 1 <= hours <= 12:
             raise SetupError("OVERNIGHT_HOURS: use an integer from 1 to 12")

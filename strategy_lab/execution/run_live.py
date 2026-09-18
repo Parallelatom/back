@@ -38,6 +38,8 @@ def main():
     parser.add_argument("--log-interval", type=float, default=5, help="heartbeat seconds; new prices/states print immediately")
     parser.add_argument("--attach-buy", nargs=2, metavar=("POSITION_ID", "TX_HASH"))
     parser.add_argument("--retry-claim", metavar="POSITION_ID")
+    parser.add_argument("--reset-risk-session", action="store_true",
+                        help="reset continuous-session loss/attempt counters after all positions close")
     args = parser.parse_args()
     os.umask(0o077)
     ledger = None
@@ -53,8 +55,11 @@ def main():
         source, destination = Path(args.recordings), Path(args.ledger)
         if source.resolve() == destination.resolve() or (source.exists() and destination.exists() and source.samefile(destination)):
             raise ValueError("live ledger cannot be Collector database")
-        if (args.attach_buy or args.retry_claim) and not args.execute:
+        if (args.attach_buy or args.retry_claim or args.reset_risk_session) and not args.execute:
             raise ValueError("recovery actions require --execute")
+        if args.reset_risk_session and (args.watch or args.continuous or args.overnight_hours is not None
+                                        or args.until is not None or args.attach_buy or args.retry_claim):
+            raise SetupError("RESET_SESSION_OPTIONS: run reset by itself with --execute")
         # One process per wallet on this host, even across different ledger paths.
         stage = "wallet process lock (another runner may be active)"
         lock_path = Path(tempfile.gettempdir()) / f"9live-{os.getuid()}-{wallet}.lock"
@@ -89,6 +94,11 @@ def main():
             broker.attach_buy(*args.attach_buy)
         if args.retry_claim:
             broker.retry_claim(args.retry_claim)
+        if args.reset_risk_session:
+            session = broker.reset_risk_session()
+            print("RISK SESSION RESET | attempts=0 | loss=0.00/%.2f USDC | execution history preserved"
+                  % (session["loss_limit_micro"] / 1e6), flush=True)
+            return
         engine = Executor(settings, ledger, broker)
         while True:
             now = int(time.time())

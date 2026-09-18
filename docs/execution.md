@@ -62,6 +62,20 @@ to resume the saved session. A different deadline is refused. After the deadline
 stop but the process keeps reconciling and claiming pending positions. There is no automatic
 second night or budget reset. Unknown transactions remain reserved and are never resent.
 
+To deliberately start fresh continuous-session attempt and realized-loss counters, first
+stop the runner and confirm that every position is terminal (`REDEEMED`, `LOST`,
+`BUY_REJECTED` or `EXPIRED`). Then run:
+
+```sh
+bash run-live.sh XYZCL --execute --reset-risk-session
+bash run-live.sh XYZCL --execute --watch --continuous
+```
+
+The reset preserves all positions, transaction hashes, payouts and comparison history. It
+only moves the continuous session baseline to the current terminal history. It refuses to
+run while a buy, result or claim is pending. Both the entry check and atomic reservation
+use this same baseline, so losses from before the reset cannot reappear as `daily loss limit`.
+
 At 09:00, compare with the original dashboard's **Delta Edge** model:
 
 ```sh

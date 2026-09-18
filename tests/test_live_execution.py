@@ -645,6 +645,29 @@ def test_new_continuous_session_recycles_and_preserves_halt(rig):
     assert rig.broker.entry_block() == 'manual review required'
 
 
+def test_risk_session_reset_aligns_entry_and_reservation_loss_guards(rig):
+    rig.broker.start_continuous()
+    add_closed(rig, 0, NOW, lost=True)
+    add_closed(rig, 1, NOW + 1, lost=True)
+    assert rig.broker.entry_block() == 'overnight loss limit reached'
+
+    status = rig.broker.reset_risk_session()
+    assert status['attempts'] == 0 and status['loss_micro'] == 0
+    assert rig.broker.entry_block() is None
+    add_closed(rig, 2, NOW + 2)
+    assert rig.ledger.get('test-2')['state'] == 'REDEEMED'
+
+
+def test_risk_session_reset_refuses_active_position(rig):
+    rig.broker.start_continuous()
+    intent = {'id': 'active', 'symbol': 'BTC', 'ending': END + 900,
+              'pool': POOL, 'outcome': UP, 'side': 'UP', 'strategy': 'Delta Edge',
+              'amount': 1000000, 'minimum_shares': 1300001, 'quoted_shares': 1314422}
+    assert rig.ledger.reserve(intent, rig.settings, NOW) == 'reserved'
+    with pytest.raises(ValueError, match='RESET_SESSION_ACTIVE'):
+        rig.broker.reset_risk_session()
+
+
 def test_continuous_trades_do_not_leak_into_overnight_comparison(rig, monkeypatch):
     from strategy_lab.execution import compare
     rig.broker.start_until(NOW + 3600)
