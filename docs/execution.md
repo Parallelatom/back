@@ -17,6 +17,12 @@ existing 1% quote tolerance. An actual fill below that stored minimum is still a
 and claimed, but persistently stops future buys. The API cannot atomically enforce minimum
 output, so quote success is not a guaranteed fill price.
 
+The live Delta Edge entry window can open earlier per wallet with
+`trade_window_open_seconds`. It defaults to `300` (five minutes), accepts `300` through
+`840`, and does not change the dashboard's five-minute paper baseline. For a reversible
+nine-minute trial set the selected wallet to `"trade_window_open_seconds": 540` and restart
+the runner. Existing positions and durable loss/session counters remain intact.
+
 Stop the old live runner with Ctrl-C before starting the timed one, using the SAME ledger.
 For the requested run ending **2026-09-17 09:00 Asia/Bangkok**:
 

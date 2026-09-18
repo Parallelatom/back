@@ -139,13 +139,18 @@ def _side_of(delta: float) -> str:
     return "UP" if delta > 0 else "DOWN"
 
 
-def delta_edge(thresholds: Optional[Dict[str, float]] = None) -> Strategy:
+def delta_edge(thresholds: Optional[Dict[str, float]] = None,
+               window_opens: int = WINDOW_OPENS,
+               window_closes: int = WINDOW_CLOSES) -> Strategy:
     """Act the moment the price is far enough from the Strike, in the direction it leans."""
     thresholds = DELTA_THRESHOLD_PCT if thresholds is None else thresholds
+    if (type(window_opens) is not int or type(window_closes) is not int
+            or not 0 < window_closes < window_opens < 900):
+        raise ValueError("invalid Delta Edge trade window")
 
     def decide(record: RoundRecord) -> Optional[Entry]:
         threshold = thresholds.get(record.symbol, DEFAULT_DELTA_THRESHOLD_PCT)
-        opens, closes = _window(record)
+        opens, closes = record.ending - window_opens, record.ending - window_closes
         for ts, _ in record.prices:
             if ts < opens:
                 continue

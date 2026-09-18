@@ -4,7 +4,7 @@ import math
 
 from ..amm import Reserves
 from ..ingest import _fully_covered
-from ..replay import ALL_STRATEGIES, RoundRecord, WINDOW_CLOSES, WINDOW_OPENS
+from ..replay import ALL_STRATEGIES, RoundRecord, WINDOW_CLOSES, WINDOW_OPENS, delta_edge
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,9 @@ def decide(snapshot, settings, now):
         return None, "Symbol is not assigned to this wallet"
     if record.winner:
         return None, "Round already resolved"
-    if not WINDOW_CLOSES <= record.ending - now <= WINDOW_OPENS:
+    window_opens = getattr(settings, "trade_window_open_seconds", WINDOW_OPENS)
+    window_closes = getattr(settings, "trade_window_close_seconds", WINDOW_CLOSES)
+    if not window_closes <= record.ending - now <= window_opens:
         return None, "outside Trade Window"
     if not 0 <= now - snapshot.metadata_at <= settings.max_age_seconds:
         return None, "stale Round metadata"
@@ -56,7 +58,9 @@ def decide(snapshot, settings, now):
         if any(value.up <= 0 or value.down <= 0 for _, value in reserves):
             return None, "invalid Reserves"
     causal = replace(record, prices=prices, reserves=reserves)
-    strategy = next(s for s in ALL_STRATEGIES if s.name == settings.strategy)
+    strategy = (delta_edge(window_opens=window_opens, window_closes=window_closes)
+                if settings.mode == "live" and settings.strategy == "Delta Edge"
+                else next(s for s in ALL_STRATEGIES if s.name == settings.strategy))
     entry = strategy.decide(causal)
     if entry is None or not 0 <= now - entry.at <= settings.max_signal_age_seconds:
         return None, "no fresh Strategy signal"

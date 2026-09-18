@@ -70,7 +70,12 @@ def settings_from_profile(profile, symbol, wallet):
     floor = profile.get("min_quote_shares_micro", 1_300_000)
     if type(floor) is not int or not 1_300_000 <= floor <= 100_000_000:
         raise SetupError("CONFIG_SHARE_FLOOR: min_quote_shares_micro must be an integer >= 1300000")
-    return SimpleNamespace(**{**settings.__dict__, "mode": "live", "min_quote_shares_micro": floor})
+    window = profile.get("trade_window_open_seconds", 300)
+    if type(window) is not int or not 300 <= window <= 840:
+        raise SetupError("CONFIG_TRADE_WINDOW: trade_window_open_seconds must be an integer from 300 to 840")
+    return SimpleNamespace(**{**settings.__dict__, "mode": "live", "min_quote_shares_micro": floor,
+                              "trade_window_open_seconds": window,
+                              "trade_window_close_seconds": 75})
 
 
 class LiveBroker:

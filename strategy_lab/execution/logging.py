@@ -22,7 +22,10 @@ def market_status(snapshot, now, settings):
     strike = record.strike if math.isfinite(record.strike) and record.strike > 0 else None
     delta = (price - strike) / strike * 100 if price is not None and strike else None
     # Use the same first-crossing rule as the strategy, but never change its decision.
-    first = delta_edge().decide(replace(record, prices=prices)) if prices and strike else None
+    window_opens = getattr(settings, "trade_window_open_seconds", 300)
+    window_closes = getattr(settings, "trade_window_close_seconds", 75)
+    first = (delta_edge(window_opens=window_opens, window_closes=window_closes)
+             .decide(replace(record, prices=prices))) if prices and strike else None
     return {"symbol": record.symbol, "round_start": record.starting, "round_end": record.ending,
             "pool": snapshot.pool, "price": price, "strike": strike, "delta_pct": delta,
             "threshold_pct": DELTA_THRESHOLD_PCT.get(record.symbol, DEFAULT_DELTA_THRESHOLD_PCT),
@@ -33,7 +36,9 @@ def market_status(snapshot, now, settings):
             "first_signal_timestamp": first.at if first else None,
             "first_signal_side": first.side if first else None,
             "signal_age_seconds": now - first.at if first else None,
-            "max_signal_age_seconds": settings.max_signal_age_seconds}
+            "max_signal_age_seconds": settings.max_signal_age_seconds,
+            "trade_window_open_seconds": window_opens,
+            "trade_window_close_seconds": window_closes}
 
 
 def explain(reason, market):
@@ -41,8 +46,12 @@ def explain(reason, market):
         if market and market["signal_age_seconds"] is not None and market["signal_age_seconds"] > market["max_signal_age_seconds"]:
             return f"พลาดสัญญาณแรก {market['first_signal_side']} มา {market['signal_age_seconds']}s แล้ว — รอรอบถัดไป"
         return "รอ Delta เข้าเงื่อนไข"
+    outside = "อยู่นอกช่วงซื้อ"
+    if market:
+        outside += (f" (live เหลือ {market['trade_window_open_seconds']}–"
+                    f"{market['trade_window_close_seconds']}s)")
     return {
-        "outside Trade Window": "อยู่นอกช่วงซื้อ (live เหลือ 300–75s)",
+        "outside Trade Window": outside,
         "new entries disabled": "ปิดซื้อใหม่ / มีไฟล์ HALT",
         "configured lifetime trade count reached": "ครบจำนวนรอบทดลอง — ยังติดตามสถานะ/claim ต่อ",
         "overnight entry deadline reached": "ครบเวลาค้างคืน — หยุดซื้อใหม่ แต่ยังติดตาม/claim ต่อ",

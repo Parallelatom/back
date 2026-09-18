@@ -82,3 +82,13 @@ def test_json_logs_include_price_and_human_logs_no_invented_price():
     missing = replace(snapshot(), record=replace(snapshot().record, prices=[]))
     status = market_status(missing, NOW, Settings())
     assert status["price"] is None and status["delta_pct"] is None and status["price_stale"] is True
+
+
+def test_outside_window_log_uses_configured_live_window():
+    settings = Settings()
+    object.__setattr__(settings, "trade_window_open_seconds", 540)
+    object.__setattr__(settings, "trade_window_close_seconds", 75)
+    data = report(reason="outside Trade Window", market=market_status(snapshot(), NOW, settings))
+    lines = []
+    LiveLog(emit=lines.append).report(data, NOW)
+    assert "live เหลือ 540–75s" in lines[-1]

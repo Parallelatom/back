@@ -15,7 +15,7 @@ from strategy_lab.replay import RoundRecord
 from strategy_lab.execution.accounts import CLAIMANT, USDC, ZERO, TRANSFER
 from strategy_lab.execution.engine import Executor
 from strategy_lab.execution.live import LiveBroker, settings_from_profile
-from strategy_lab.execution.signals import Snapshot
+from strategy_lab.execution.signals import Snapshot, decide
 from strategy_lab.execution.store import Ledger
 
 POOL = "0x" + "22" * 20
@@ -258,6 +258,25 @@ def test_slippage_acknowledgement_required_before_api(rig):
     rig.profile["accept_unprotected_slippage"] = False
     reason = Executor(rig.settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
     assert reason.startswith("quote unavailable") and not rig.posts
+
+
+def test_live_trade_window_can_open_at_nine_minutes_without_changing_paper(rig):
+    early = END - 540
+    record = replace(rig.snapshot.record,
+                     prices=[(t, 100. if t < early else 100.2)
+                             for t in range(START, early + 1, 5)])
+    snapshot = replace(rig.snapshot, record=record, metadata_at=early)
+    assert decide(snapshot, rig.settings, early)[0] is None
+    rig.settings.trade_window_open_seconds = 540
+    entry, reason = decide(snapshot, rig.settings, early)
+    assert reason == "signal" and entry.at == early and entry.side == "UP"
+
+
+@pytest.mark.parametrize("value", [True, 299, 841, 540.0])
+def test_live_trade_window_rejects_unsafe_config(rig, value):
+    rig.profile["trade_window_open_seconds"] = value
+    with pytest.raises(ValueError, match="CONFIG_TRADE_WINDOW"):
+        settings_from_profile(rig.profile, "BTC", rig.broker.wallet)
 
 
 @pytest.mark.parametrize("source,observations", [
