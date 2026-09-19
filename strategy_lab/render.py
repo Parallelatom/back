@@ -351,9 +351,9 @@ def _toggles(include_stale: bool, include_partial: bool) -> str:
     )
 
 
-def _periods_section(results_by_symbol) -> str:
+def _periods_section(results_by_symbol, symbols=None) -> str:
     panels = []
-    for symbol in sources.SYMBOLS:
+    for symbol in (sources.SYMBOLS if symbols is None else symbols):
         results = results_by_symbol[symbol]
         days, cells = periods_table(results, ALL_STRATEGIES)
         if not days:
@@ -416,13 +416,51 @@ def _pricing_alarm(conn) -> str:
     )
 
 
+def _venue_tabs(panels_by_venue, results_by_symbol) -> str:
+    """One tab per venue, switched by CSS alone.
+
+    The page is a static file served from a read-only connection, and a tab that needs
+    JavaScript to reveal what is already in the document is a way for the reading to fail
+    silently. Radio inputs cannot: with styles off, every venue is simply visible.
+    """
+    venues = list(panels_by_venue)
+    inputs, labels, panels, rules = [], [], [], []
+    for index, venue in enumerate(venues):
+        ident = f"venue-{index}"
+        checked = " checked" if index == 0 else ""
+        inputs.append(f'<input class="venue-radio" type="radio" name="venue" id="{ident}"{checked}>')
+        labels.append(f'<label class="venue-tab" for="{ident}">{html.escape(venue)}</label>')
+        panels.append(
+            f'<div class="venue-panel">'
+            f"<main>{''.join(panels_by_venue[venue]) or _NO_VENUE_DATA}</main>"
+            f'<section class="wide"><h2>How it is holding up</h2>'
+            f'<p class="meta">Hit Rate by the day a Round settled, with the number of Paper'
+            f" Trades behind it. A lifetime average stays healthy for a long time after an"
+            f" edge has closed; a row of recent days does not. Days below the"
+            f" {BREAK_EVEN_HIT_RATE:.1%} break-even are dimmed.</p>"
+            f"{_periods_section(results_by_symbol, sources.symbols_of(venue))}</section></div>"
+        )
+        rules.append(
+            f"#{ident}:checked ~ .venue-bar label[for={ident}] "
+            "{ color: var(--ink); border-color: var(--muted); background: var(--panel); }"
+            f"\n  #{ident}:checked ~ .venue-panel:nth-of-type({index + 1}) "
+            "{ display: block; }"
+        )
+    bar = f'<nav class="venue-bar">{"".join(labels)}</nav>'
+    return (f'<style>\n  {chr(10).join("  " + rule for rule in rules).strip()}\n</style>'
+            f'<div class="venues">{"".join(inputs)}{bar}{"".join(panels)}</div>')
+
+
+_NO_VENUE_DATA = ('<section><p class="meta">Nothing recorded for this venue yet.</p></section>')
+
+
 def render_page(
     conn: sqlite3.Connection,
     include_stale: bool = False,
     include_partial: bool = False,
     page: int = 1,
 ) -> str:
-    panels = []
+    panels_by_venue = {venue: [] for venue in sources.VENUES}
     entries = {}
     results_by_symbol = {}
     for symbol in sources.SYMBOLS:
@@ -458,18 +496,17 @@ def render_page(
         ]
         drawn = [point for result in results.values() for point in result.curve]
         span = (min(p[0] for p in drawn), max(p[0] for p in drawn)) if drawn else None
-        panels.append(
+        panels_by_venue[sources.venue_of(symbol)].append(
             f'<section><h2>{html.escape(symbol)}</h2>'
             f'<p class="meta">{recorded} Rounds recorded · {scoreable} scoreable</p>'
             f"{_table(symbol, results, rebuilt, scoreable)}"
             f"{_chart(symbol, results, span, timeline)}</section>"
         )
     return _DOCUMENT.format(
-        panels="".join(panels),
+        venues=_venue_tabs(panels_by_venue, results_by_symbol),
         alarm=_pricing_alarm(conn),
         toggles=_toggles(include_stale, include_partial),
         rounds=_recent_rounds(conn, entries, include_stale, include_partial, page),
-        periods=_periods_section(results_by_symbol),
         break_even=f"{BREAK_EVEN_HIT_RATE:.1%}",
         generated=html.escape(format_time(int(datetime.now(timezone.utc).timestamp()))),
         offset=DISPLAY_OFFSET_HOURS,
@@ -538,6 +575,14 @@ _DOCUMENT = """<!doctype html>
   .scroller {{ overflow-x: auto; }}
   .tag {{ display: inline-block; font-size: 11px; padding: 1px 6px; margin-right: 4px;
           border: 1px solid; border-radius: 4px; }}
+  .venue-radio {{ position: absolute; opacity: 0; pointer-events: none; }}
+  .venue-bar {{ max-width: 1140px; margin: 18px auto 0; padding: 0 20px; display: flex;
+                gap: 8px; flex-wrap: wrap; }}
+  .venue-tab {{ font-size: 13px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
+                border: 1px solid var(--line); color: var(--muted); }}
+  .venue-radio:focus-visible + .venue-bar .venue-tab {{ outline: 2px solid var(--muted); }}
+  .venue-panel {{ display: none; }}
+  @media (prefers-reduced-motion: no-preference) {{ .venue-tab {{ transition: color .1s; }} }}
   footer {{ padding: 20px 20px 40px; color: var(--muted); font-size: 12px; }}
   footer strong {{ color: var(--ink); }}
 </style>
@@ -549,14 +594,7 @@ _DOCUMENT = """<!doctype html>
      Generated {generated}.</p>
 </header>
 {alarm}
-<main>{panels}</main>
-<section class="wide">
-  <h2>How it is holding up</h2>
-  <p class="meta">Hit Rate by the day a Round settled, with the number of Paper Trades
-     behind it. A lifetime average stays healthy for a long time after an edge has closed;
-     a row of recent days does not. Days below the {break_even} break-even are dimmed.</p>
-  {periods}
-</section>
+{venues}
 <section class="wide">
   <h2>Recent Rounds</h2>
   <p class="meta">Settled Rounds, newest first, so the scoring can be checked against

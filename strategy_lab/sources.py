@@ -22,6 +22,21 @@ WS_URL = "wss://arb-websocket.9lives.so"
 CATEGORY = "15mins"
 SYMBOLS = ("BTC", "XYZCL")
 
+# Which venue each Symbol trades on. A second venue is a second entry here and an adapter
+# below; nothing above the Ingest seam should have to learn a venue's name to work.
+VENUES = {"9lives": SYMBOLS}
+
+
+def symbols_of(venue: str):
+    return VENUES[venue]
+
+
+def venue_of(symbol: str) -> str:
+    for venue, symbols in VENUES.items():
+        if symbol in symbols:
+            return venue
+    raise KeyError(symbol)
+
 WS_ORIGIN = "https://9lives.so"
 PRICES_TABLE = "oracles_ninelives_prices_2"
 # Keyed by pool rather than Symbol, so they are subscribed whole and filtered on arrival.

@@ -1,6 +1,7 @@
 """Ticket 09: what the page must show, and what it must never quietly hide."""
 import pytest
 
+from strategy_lab import sources
 from strategy_lab.db import connect, initialise
 from strategy_lab.ingest import Ingest, RoundMeta
 from strategy_lab.render import DISPLAY_OFFSET_HOURS, format_time, render_page, segments
@@ -152,3 +153,53 @@ class TestThePage:
         ingest.conn.commit()
 
         assert "rebuilt" in render_page(ingest.conn).lower()
+
+
+class TestVenueTabs:
+    """One tab per venue, and no venue's numbers leaking into another's tab."""
+
+    def test_every_venue_gets_a_tab(self, ingest, monkeypatch):
+        monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "world.xyz": (BTC,)})
+        monkeypatch.setattr(sources, "SYMBOLS", (OIL, BTC))
+
+        page = render_page(ingest.conn)
+        assert page.count('class="venue-tab"') == 2
+        assert ">9lives</label>" in page and ">world.xyz</label>" in page
+
+    def test_the_first_venue_is_the_one_shown(self, ingest, monkeypatch):
+        monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "world.xyz": (BTC,)})
+        monkeypatch.setattr(sources, "SYMBOLS", (OIL, BTC))
+
+        page = render_page(ingest.conn)
+        assert page.count(" checked>") == 1
+        assert 'id="venue-0" checked>' in page
+
+    def test_each_tab_shows_only_its_own_venues_markets(self, ingest, monkeypatch):
+        monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "world.xyz": (BTC,)})
+        monkeypatch.setattr(sources, "SYMBOLS", (OIL, BTC))
+        a_round(ingest, symbol=OIL)
+
+        page = render_page(ingest.conn)
+        first = page.split('class="venue-panel"')[1]
+        assert f"<h2>{OIL}</h2>" in first and f"<h2>{BTC}</h2>" not in first
+
+    def test_a_venue_with_nothing_recorded_says_so_rather_than_showing_nothing(
+            self, ingest, monkeypatch):
+        monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "empty": ()})
+        monkeypatch.setattr(sources, "SYMBOLS", (OIL,))
+
+        assert "Nothing recorded for this venue yet" in render_page(ingest.conn)
+
+    def test_switching_tabs_needs_no_javascript(self, ingest):
+        page = render_page(ingest.conn)
+        assert "<script" not in page.lower()
+        assert ":checked ~ .venue-panel" in page
+
+    def test_the_holding_up_table_sits_inside_its_venues_tab(self, ingest, monkeypatch):
+        monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "world.xyz": (BTC,)})
+        monkeypatch.setattr(sources, "SYMBOLS", (OIL, BTC))
+        a_round(ingest, symbol=OIL)
+
+        page = render_page(ingest.conn)
+        assert page.count("How it is holding up") == 2
+        assert page.index('class="venue-panel"') < page.index("How it is holding up")
