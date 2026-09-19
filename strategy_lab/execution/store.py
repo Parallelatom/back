@@ -90,6 +90,18 @@ class Ledger:
         # normal entry slot. Late-confirmed purchases become active positions again.
         return [p for p in self.active() if p["state"] != "BUY_UNKNOWN"]
 
+    def entry_slot_block(self, settings, now):
+        active = self.entry_active()
+        if len(active) >= settings.max_open_positions:
+            return "open-position limit"
+        # The second live slot only permits a *confirmed* buy from an earlier
+        # Round whose result is delayed. Ambiguous buys and pending claims do not
+        # qualify for an overlapping entry.
+        if settings.mode == "live" and settings.max_open_positions > 1 and active:
+            if any(p["state"] != "OPEN" or p["ending"] > now for p in active):
+                return "waiting for buy confirmation or claim"
+        return None
+
     def transition(self, identity, expected, state, now, **fields):
         allowed = {"shares", "cost", "payout", "buy_ref", "redeem_ref", "winner", "error"}
         if not set(fields) <= allowed:
@@ -138,8 +150,9 @@ class Ledger:
                 loss_positions = [p for p in all_positions if p["updated_at"] >= day]
             loss = sum(max(0, p["cost"] - p["payout"]) for p in loss_positions
                        if p["state"] in TERMINAL)
-            if len([p for p in active if p["state"] != "BUY_UNKNOWN"]) >= settings.max_open_positions:
-                return "open-position limit"
+            slot_block = self.entry_slot_block(settings, now)
+            if slot_block:
+                return slot_block
             if sum(p["amount"] for p in active) + intent["amount"] > settings.max_exposure:
                 return "exposure limit"
             if cash < intent["amount"]:

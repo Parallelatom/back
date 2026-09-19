@@ -63,9 +63,12 @@ class RPC:
 
 def settings_from_profile(profile, symbol, wallet):
     # Reuse the strict paper risk-value validation, then explicitly select live mode.
+    open_limit = profile.get("max_open_positions", 1)
+    if type(open_limit) is not int or open_limit not in (1, 2):
+        raise SetupError("CONFIG_OPEN_POSITIONS: max_open_positions must be 1 or 2")
     settings = Settings(enabled=profile.get("enabled", False), symbols=(symbol,),
                         wallet_label=wallet, strategy="Delta Edge", stake=1_000_000,
-                        bankroll=10_000_000, max_open_positions=1, max_exposure=10_000_000,
+                        bankroll=10_000_000, max_open_positions=open_limit, max_exposure=10_000_000,
                         daily_spend=10_000_000, daily_loss=2_000_000, max_signal_age_seconds=15)
     floor = profile.get("min_quote_shares_micro", 1_300_000)
     if type(floor) is not int or not 1_300_000 <= floor <= 100_000_000:

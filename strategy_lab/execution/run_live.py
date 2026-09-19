@@ -107,8 +107,8 @@ def main():
             blocked = broker.entry_block()
             halted = Path(args.halt_file).exists()
             reason = blocked or ("new entries disabled" if halted or not settings.enabled else None)
-            if reason is None and len(ledger.entry_active()) >= settings.max_open_positions:
-                reason = "open-position limit"
+            if reason is None:
+                reason = ledger.entry_slot_block(settings, now)
             snapshot = None
             readings_failed = False
             try:

@@ -68,6 +68,7 @@ def explain(reason, market):
         "unknown buy exposure limit reached": "รายการซื้อไม่ทราบผลรวมถึง 2 USDC — หยุดซื้อเพิ่มเพื่อตรวจสอบ",
         "BUY_PENDING": "ส่งซื้อแล้ว/รอตรวจสอบผล — ยังไม่ยืนยันว่าได้ shares",
         "open-position limit": "มีออร์เดอร์ค้าง — รอยืนยันซื้อ/ผลรอบ/claim ก่อนซื้อเพิ่ม",
+        "waiting for buy confirmation or claim": "รอยืนยันซื้อหรือเคลมก่อน — ยังไม่เปิดออร์เดอร์ซ้อน",
     }.get(reason, reason)
 
 
