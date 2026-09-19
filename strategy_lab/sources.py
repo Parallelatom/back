@@ -22,9 +22,31 @@ WS_URL = "wss://arb-websocket.9lives.so"
 CATEGORY = "15mins"
 SYMBOLS = ("BTC", "XYZCL")
 
+# XO Market's Pulse: one BTC market on a five-minute cycle, settled on a Chainlink TWAP
+# against the previous cycle's closing TWAP rather than against a spot Strike. Its rounds
+# arrive by backfill from a public API, so the Collector never polls them.
+XO_SYMBOLS = ("XO-BTC5",)
+XO_API = "https://api-mainnet.xo.market"
+XO_MARKET_CONFIG = {"XO-BTC5": 2}
+
 # Which venue each Symbol trades on. A second venue is a second entry here and an adapter
 # below; nothing above the Ingest seam should have to learn a venue's name to work.
-VENUES = {"9lives": SYMBOLS}
+# SYMBOLS stays what the 9lives Collector polls; ALL_SYMBOLS is everything on the page.
+VENUES = {"9lives": SYMBOLS, "xo.market": XO_SYMBOLS}
+ALL_SYMBOLS = tuple(symbol for symbols in VENUES.values() for symbol in symbols)
+
+# Said on the venue's own tab, because the Bankroll column is priced by the 9lives AMM and
+# a venue that does not price that way would otherwise be read as having lost the money.
+VENUE_NOTES = {
+    "xo.market": (
+        "Pulse cycles settle on a Chainlink TWAP against the previous cycle's closing "
+        "TWAP, not on a spot price against a Strike, so these Hit Rates do not answer the "
+        "same question as the 9lives tab. Only two prices exist per cycle, its open and "
+        "its close, so any Strategy that watches a price move takes no trade here. The "
+        "venue runs an order book rather than the AMM this Bankroll column is priced "
+        "with: read the Hit Rate and ignore the money entirely."
+    ),
+}
 
 
 def symbols_of(venue: str):

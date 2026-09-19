@@ -92,16 +92,24 @@ class TestDisplayedTime:
 
 
 class TestThePage:
-    def test_loading_more_rounds_does_not_add_per_round_queries(self, ingest):
-        for n in range(10):
+    def _statements_for(self, ingest, rounds):
+        for n in range(rounds):
             a_round(ingest, ending=T0 + (n + 1) * GRID)
         statements = []
         ingest.conn.set_trace_callback(statements.append)
         page = render_page(ingest.conn)
         ingest.conn.set_trace_callback(None)
+        return statements, page
 
+    def test_loading_more_rounds_does_not_add_per_round_queries(self, ingest):
+        """Queries may scale with Symbols, which are few and known. Never with Rounds."""
+        few, page = self._statements_for(ingest, 10)
         assert "10 Rounds recorded" in page
-        assert len(statements) <= 16
+
+        many, page = self._statements_for(ingest, 40)
+        assert "40 Rounds recorded" in page
+        assert len(many) == len(few)
+        assert len(few) <= 6 * len(sources.ALL_SYMBOLS)
 
     def test_it_names_every_strategy_for_both_symbols(self, ingest):
         a_round(ingest, symbol=BTC)
@@ -160,7 +168,7 @@ class TestVenueTabs:
 
     def test_every_venue_gets_a_tab(self, ingest, monkeypatch):
         monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "world.xyz": (BTC,)})
-        monkeypatch.setattr(sources, "SYMBOLS", (OIL, BTC))
+        monkeypatch.setattr(sources, "ALL_SYMBOLS", (OIL, BTC))
 
         page = render_page(ingest.conn)
         assert page.count('class="venue-tab"') == 2
@@ -168,7 +176,7 @@ class TestVenueTabs:
 
     def test_the_first_venue_is_the_one_shown(self, ingest, monkeypatch):
         monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "world.xyz": (BTC,)})
-        monkeypatch.setattr(sources, "SYMBOLS", (OIL, BTC))
+        monkeypatch.setattr(sources, "ALL_SYMBOLS", (OIL, BTC))
 
         page = render_page(ingest.conn)
         assert page.count(" checked>") == 1
@@ -176,7 +184,7 @@ class TestVenueTabs:
 
     def test_each_tab_shows_only_its_own_venues_markets(self, ingest, monkeypatch):
         monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "world.xyz": (BTC,)})
-        monkeypatch.setattr(sources, "SYMBOLS", (OIL, BTC))
+        monkeypatch.setattr(sources, "ALL_SYMBOLS", (OIL, BTC))
         a_round(ingest, symbol=OIL)
 
         page = render_page(ingest.conn)
@@ -186,7 +194,7 @@ class TestVenueTabs:
     def test_a_venue_with_nothing_recorded_says_so_rather_than_showing_nothing(
             self, ingest, monkeypatch):
         monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "empty": ()})
-        monkeypatch.setattr(sources, "SYMBOLS", (OIL,))
+        monkeypatch.setattr(sources, "ALL_SYMBOLS", (OIL,))
 
         assert "Nothing recorded for this venue yet" in render_page(ingest.conn)
 
@@ -197,7 +205,7 @@ class TestVenueTabs:
 
     def test_the_holding_up_table_sits_inside_its_venues_tab(self, ingest, monkeypatch):
         monkeypatch.setattr(sources, "VENUES", {"9lives": (OIL,), "world.xyz": (BTC,)})
-        monkeypatch.setattr(sources, "SYMBOLS", (OIL, BTC))
+        monkeypatch.setattr(sources, "ALL_SYMBOLS", (OIL, BTC))
         a_round(ingest, symbol=OIL)
 
         page = render_page(ingest.conn)

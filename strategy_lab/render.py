@@ -353,7 +353,7 @@ def _toggles(include_stale: bool, include_partial: bool) -> str:
 
 def _periods_section(results_by_symbol, symbols=None) -> str:
     panels = []
-    for symbol in (sources.SYMBOLS if symbols is None else symbols):
+    for symbol in (sources.ALL_SYMBOLS if symbols is None else symbols):
         results = results_by_symbol[symbol]
         days, cells = periods_table(results, ALL_STRATEGIES)
         if not days:
@@ -432,6 +432,7 @@ def _venue_tabs(panels_by_venue, results_by_symbol) -> str:
         labels.append(f'<label class="venue-tab" for="{ident}">{html.escape(venue)}</label>')
         panels.append(
             f'<div class="venue-panel">'
+            f"{_venue_note(venue)}"
             f"<main>{''.join(panels_by_venue[venue]) or _NO_VENUE_DATA}</main>"
             f'<section class="wide"><h2>How it is holding up</h2>'
             f'<p class="meta">Hit Rate by the day a Round settled, with the number of Paper'
@@ -451,6 +452,13 @@ def _venue_tabs(panels_by_venue, results_by_symbol) -> str:
             f'<div class="venues">{"".join(inputs)}{bar}{"".join(panels)}</div>')
 
 
+def _venue_note(venue: str) -> str:
+    note = sources.VENUE_NOTES.get(venue)
+    if not note:
+        return ""
+    return (f'<section class="wide"><p class="caveat">{html.escape(note)}</p></section>')
+
+
 _NO_VENUE_DATA = ('<section><p class="meta">Nothing recorded for this venue yet.</p></section>')
 
 
@@ -463,7 +471,7 @@ def render_page(
     panels_by_venue = {venue: [] for venue in sources.VENUES}
     entries = {}
     results_by_symbol = {}
-    for symbol in sources.SYMBOLS:
+    for symbol in sources.ALL_SYMBOLS:
         results = replay(conn, symbol=symbol, strategies=ALL_STRATEGIES,
                          include_stale=include_stale, include_partial=include_partial)
         results_by_symbol[symbol] = results
