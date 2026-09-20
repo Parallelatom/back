@@ -85,13 +85,27 @@ class Ledger:
     def active(self):
         return [p for p in self.positions() if p["state"] not in TERMINAL]
 
-    def entry_active(self):
-        # Unknown API responses keep cash/exposure reserved but do not occupy the
-        # normal entry slot. Late-confirmed purchases become active positions again.
-        return [p for p in self.active() if p["state"] != "BUY_UNKNOWN"]
+    def entry_active(self, now=None):
+        """Positions occupying an entry slot, as opposed to merely holding money.
+
+        Unknown API responses keep cash/exposure reserved but do not occupy the normal
+        entry slot. Late-confirmed purchases become active positions again.
+
+        A confirmed buy whose Round has ended is in the same position once `now` is
+        given: the venue often takes minutes to publish a result, and during that wait
+        the stake is decided but unclaimable. Holding the slot open for it would sit out
+        every Round the delay spans. The stake stays counted against cash and exposure,
+        which is what actually limits how many of these may pile up.
+        """
+        awaiting = () if now is None else tuple(
+            p["id"] for p in self.active()
+            if p["state"] == "OPEN" and p["ending"] <= now
+        )
+        return [p for p in self.active()
+                if p["state"] != "BUY_UNKNOWN" and p["id"] not in awaiting]
 
     def entry_slot_block(self, settings, now):
-        active = self.entry_active()
+        active = self.entry_active(now)
         if len(active) >= settings.max_open_positions:
             return "open-position limit"
         # The second live slot only permits a *confirmed* buy from an earlier
