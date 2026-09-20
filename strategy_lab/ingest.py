@@ -454,12 +454,18 @@ class Ingest:
         A Round summarised while no prices had arrived for it was judged on nothing, and is
         revisited: the feed's snapshot reaches back hours, so a fault that has since been
         fixed would otherwise go on costing Rounds that are now perfectly good.
+
+        Backfilled Rounds are left alone. They arrive whole from a venue's own record of
+        what settled, with no tick history to re-derive anything from, so summarising them
+        against this feed's grid would only find them wanting and mark them partial —
+        silently dropping every one of them from the scoring.
         """
         pending = self.conn.execute(
             """
             SELECT symbol, ending FROM rounds
              WHERE ending <= ?
                AND (distinct_price_count IS NULL OR tick_count = 0)
+               AND source <> 'backfill'
              ORDER BY ending
             """,
             (now,),

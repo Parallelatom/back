@@ -5,10 +5,12 @@ from the payload rather than assumed. The rest of these pin the thinness of the 
 two prices per cycle and no invented path between them.
 """
 import os
+import time
 
 import pytest
 
 from strategy_lab.db import connect, initialise
+from strategy_lab.ingest import Ingest
 from strategy_lab.replay import ALL_STRATEGIES, load_rounds, replay
 from strategy_lab.xo_backfill import backfill, fetch_page, store, usable, winner_of
 
@@ -120,3 +122,47 @@ class TestTheVenueItself:
         page = fetch_page(2, 1)
         assert page["meta"]["totalPages"] >= 1
         assert any(usable(row) for row in page["data"])
+
+
+class TestLivingBesideTheCollector:
+    """The Collector sweeps every Symbol in the file, including ones it does not collect."""
+
+    def _collector_pass(self, conn):
+        ing = Ingest(conn, code_version="testver")
+        now = int(time.time())
+        return (ing.finalise_closed_rounds(now), ing.settle_from_following_rounds(),
+                ing.mark_unsettled(now))
+
+    def test_a_collector_pass_leaves_backfilled_rounds_scoreable(self, conn):
+        store(conn, SYMBOL, [cycle()], "testver")
+        assert len(load_rounds(conn, SYMBOL)) == 1
+
+        assert self._collector_pass(conn) == (0, 0, 0)
+        assert len(load_rounds(conn, SYMBOL)) == 1
+
+    def test_a_collector_pass_does_not_mark_them_partial(self, conn):
+        """Judged against the 9lives grid, a two-tick five-minute cycle looks incomplete."""
+        store(conn, SYMBOL, [cycle()], "testver")
+        self._collector_pass(conn)
+        row = conn.execute("SELECT partial, unsettled FROM rounds").fetchone()
+        assert row["partial"] == 0 and not row["unsettled"]
+
+    def test_recording_a_price_does_not_leave_a_round_needing_resummary(self, conn):
+        """Each price clears the count on the Rounds around it; restate it or the
+        Collector adopts every cycle on its next sweep."""
+        second = cycle(start="2026-09-19T14:40:00.000Z", end="2026-09-19T14:45:00.000Z",
+                       opening="101.0", closing="99.0", outcome=1)
+        store(conn, SYMBOL, [cycle(), second], "testver")
+        counts = [r[0] for r in conn.execute(
+            "SELECT distinct_price_count FROM rounds ORDER BY ending")]
+        assert counts == [2, 2]
+
+    def test_the_collector_still_summarises_its_own_rounds(self, conn):
+        """The guard must not buy quiet for the backfill by silencing the feed."""
+        conn.execute(
+            "INSERT INTO rounds (symbol, ending, starting, strike, first_seen_at,"
+            " last_seen_at, source, code_version, tick_count)"
+            " VALUES ('BTC', 1789828800, 1789827900, 100.0, 1, 1, 'live', 'testver', 0)")
+        conn.commit()
+
+        assert self._collector_pass(conn)[0] == 1

@@ -115,6 +115,16 @@ def store(conn, symbol: str, rows, version: str, now: Optional[int] = None) -> i
                 ((symbol, starting, strike, version), (symbol, ending, final, version)),
             )
             written += 1
+        # Recording a price asks the Collector to re-summarise the Rounds around it, and a
+        # cycle's open is the previous cycle's close, so each insert clears the neighbour's
+        # count as well. Nothing here needs re-deriving: restate what the venue published.
+        conn.execute(
+            """UPDATE rounds
+                  SET tick_count = 2,
+                      distinct_price_count = CASE WHEN strike = final_price THEN 1 ELSE 2 END
+                WHERE symbol = ? AND source = 'backfill' AND distinct_price_count IS NULL""",
+            (symbol,),
+        )
     return written
 
 
