@@ -14,7 +14,7 @@ import sqlite3
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .amm import SCALE, Reserves, fill, marginal_price
 
@@ -60,6 +60,9 @@ class RoundRecord:
     winner: str
     prices: Sequence[Tuple[int, float]]
     reserves: Sequence[Tuple[int, Reserves]]
+    # What the pool contract said a ticket buys, per Side, oldest first. Empty for every
+    # Round recorded before the Collector began asking it.
+    quotes: Mapping[str, Sequence[Tuple[int, Tuple[int, int]]]] = field(default_factory=dict)
 
     def price_at(self, moment: int) -> Optional[float]:
         stamps = [ts for ts, _ in self.prices]
@@ -71,6 +74,17 @@ class RoundRecord:
         stamps = [ts for ts, _ in self.reserves]
         index = bisect_right(stamps, moment) - 1
         return self.reserves[index][1] if index >= 0 else Reserves.opening()
+
+    def quote_at(self, side: str, moment: int) -> Optional[Tuple[int, int]]:
+        """The contract's answer in force at that moment, as (shares, fees), or None.
+
+        Never the next one: a Strategy that acted at noon was answered by what the pool
+        held at noon, and reaching forward would score it on a price it could not get.
+        """
+        series = self.quotes.get(side) or ()
+        stamps = [ts for ts, _ in series]
+        index = bisect_right(stamps, moment) - 1
+        return series[index][1] if index >= 0 else None
 
     def delta_pct(self, moment: int) -> Optional[float]:
         price = self.price_at(moment)
@@ -103,6 +117,9 @@ class PaperTrade:
     price_per_share: float
     won: bool
     pnl: float
+    # "chain" when the contract's own quote priced this Fill, "model" when the local
+    # pricing rule did. The two are not comparable and a curve must not mix them silently.
+    priced_by: str = "model"
 
 
 @dataclass
@@ -113,6 +130,12 @@ class Result:
     curve: List[Tuple[int, float]] = field(default_factory=list)
     bankroll: float = STARTING_BANKROLL
     ruined_at: Optional[int] = None
+
+    @property
+    def chain_priced(self) -> int:
+        """How many Fills the contract priced. The rest ran on the local rule, which
+        cannot see a pool that has been traded and so reads it as untouched."""
+        return sum(1 for trade in self.trades if trade.priced_by == "chain")
 
     @property
     def hit_rate(self) -> Optional[float]:
@@ -361,6 +384,17 @@ def load_rounds(
             (observation["ts"], Reserves(up=observation["q_up"], down=observation["q_down"]))
         )
 
+    quotes_by_round = defaultdict(lambda: defaultdict(list))
+    for observation in conn.execute(
+        "SELECT r.ending, q.side, q.ts, q.shares, q.fees FROM rounds r JOIN chain_quotes q "
+        "ON q.symbol = r.symbol AND q.round_ending = r.ending "
+        + where + "ORDER BY r.ending, q.ts",
+        (symbol,),
+    ):
+        quotes_by_round[observation["ending"]][observation["side"]].append(
+            (observation["ts"], (observation["shares"], observation["fees"]))
+        )
+
     records = []
     for row in rows:
         starting = row["starting"] or (row["ending"] - 900)
@@ -373,6 +407,7 @@ def load_rounds(
                 winner=row["winner"],
                 prices=prices_by_round[row["ending"]],
                 reserves=reserves_by_round[row["ending"]],
+                quotes=dict(quotes_by_round[row["ending"]]),
             )
         )
     return records
@@ -413,9 +448,30 @@ def _within_window(record: RoundRecord, moment: int) -> bool:
 
 
 def _settle(record: RoundRecord, entry: Entry) -> PaperTrade:
+    """Price a Fill from the contract's own quote where one was recorded.
+
+    The local rule stays as the fallback and not as the preference. It is run on Reserves
+    the exchange's indexer reports, and that indexer says nothing at all about a Round
+    already traded — so its silence reads as an untouched pool and prices the Fill at the
+    best price that exists. The contract answers for the pool as it stands.
+    """
     reserves = record.reserves_at(entry.at)
-    got = fill(reserves, entry.side, STAKE_MICRO)
+    quoted = record.quote_at(entry.side, entry.at)
     won = entry.side == record.winner
+    if quoted is not None:
+        shares, _fees = quoted
+        return PaperTrade(
+            round_ending=record.ending,
+            entered_at=entry.at,
+            side=entry.side,
+            shares=shares,
+            marginal_price=marginal_price(reserves),
+            price_per_share=STAKE_MICRO / shares if shares else 0.0,
+            won=won,
+            pnl=(shares - STAKE_MICRO) / SCALE if won else -STAKE,
+            priced_by="chain",
+        )
+    got = fill(reserves, entry.side, STAKE_MICRO)
     return PaperTrade(
         round_ending=record.ending,
         entered_at=entry.at,
@@ -425,4 +481,5 @@ def _settle(record: RoundRecord, entry: Entry) -> PaperTrade:
         price_per_share=got.price_per_share,
         won=won,
         pnl=got.profit_on_win if won else -STAKE,
+        priced_by="model",
     )

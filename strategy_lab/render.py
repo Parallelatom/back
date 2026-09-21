@@ -390,6 +390,27 @@ def _periods_section(results_by_symbol, symbols=None) -> str:
     return "".join(panels)
 
 
+def _pricing_note(results) -> str:
+    """Say how many Fills the contract priced, wherever it is not all of them.
+
+    Before the Collector began asking the pool directly, a Fill was priced by the local
+    rule on Reserves the exchange reports — and it reports nothing for a Round already
+    traded, so those Fills are priced as though the pool were untouched, which is the best
+    price there is. Curves that span the change are two measurements, not one trend.
+    """
+    scored = max((len(result.trades) for result in results.values()), default=0)
+    chain = max((result.chain_priced for result in results.values()), default=0)
+    if not scored or chain == scored:
+        return ""
+    if not chain:
+        return ('<p class="caveat">No Fill here was priced by the contract. Every one ran '
+                "on the local rule, which reads a traded pool as untouched and so prices "
+                "at the best price available. Read the Hit Rate; the money is optimistic.</p>")
+    return (f'<p class="caveat">{chain} of {scored} Fills were priced by the contract; the '
+            "rest ran on the local rule, which prices a traded pool as untouched. The curve "
+            "spans both and is two measurements rather than one trend.</p>")
+
+
 def _pricing_alarm(conn) -> str:
     """Say loudly when the local pricing rule last disagreed with the contract.
 
@@ -507,6 +528,7 @@ def render_page(
         panels_by_venue[sources.venue_of(symbol)].append(
             f'<section><h2>{html.escape(symbol)}</h2>'
             f'<p class="meta">{recorded} Rounds recorded · {scoreable} scoreable</p>'
+            f"{_pricing_note(results)}"
             f"{_table(symbol, results, rebuilt, scoreable)}"
             f"{_chart(symbol, results, span, timeline)}</section>"
         )

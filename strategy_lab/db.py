@@ -111,6 +111,24 @@ CREATE TABLE IF NOT EXISTS reconcile_log (
     code_version  TEXT    NOT NULL
 );
 
+-- What the pool contract itself says a one dollar ticket buys, recorded as it is asked.
+-- The exchange's indexer reports nothing at all for a Round that has already been traded,
+-- so Reserves derived from it silently fall back to an untouched pool and price every Fill
+-- at the best price there is. The contract has no such gap: it answers for the pool as it
+-- actually stands. Scoring still reads only this database (ADR-0002); what changes is that
+-- the price it reads is evidence rather than a model run on absent inputs.
+CREATE TABLE IF NOT EXISTS chain_quotes (
+    symbol       TEXT    NOT NULL,
+    round_ending INTEGER NOT NULL,
+    side         TEXT    NOT NULL,
+    ts           INTEGER NOT NULL,
+    gross        INTEGER NOT NULL,
+    shares       INTEGER NOT NULL,
+    fees         INTEGER NOT NULL,
+    code_version TEXT    NOT NULL,
+    PRIMARY KEY (symbol, round_ending, side, ts)
+);
+
 CREATE TABLE IF NOT EXISTS quote_checks (
     ts             INTEGER NOT NULL,
     pool_address   TEXT    NOT NULL,

@@ -31,6 +31,13 @@ BACKFILL_DELAY_SECONDS = 30
 BACKFILL_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_BACKFILL_SECONDS", "900"))
 RECONCILE_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_RECONCILE_SECONDS", "30"))
 VERIFY_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_VERIFY_SECONDS", "86400"))
+# How often to ask the contract what a ticket buys, and how long before settlement to
+# start asking. Only the entry window can produce a Paper Trade, so quoting outside it
+# would spend calls on moments no Strategy can act in.
+QUOTE_EVERY_SECONDS = float(os.environ.get("STRATEGY_LAB_QUOTE_SECONDS", "10"))
+QUOTE_WINDOW_SECONDS = float(os.environ.get("STRATEGY_LAB_QUOTE_WINDOW_SECONDS", "330"))
+# The ticket every Paper Trade is scored on.
+QUOTE_GROSS = 1_000_000
 VERIFY_DELAY_SECONDS = 120
 SILENCE_CHECK_SECONDS = 300
 # The feed publishes about every five seconds; five minutes of nothing is a fault.
@@ -85,6 +92,55 @@ async def reconcile_reserves(ingest: Ingest, graph: Graph, stop: asyncio.Event) 
             except Exception:
                 log.exception("reserve reconcile failed for %s", symbol)
             await _sleep(stop, sources.jittered(RECONCILE_EVERY_SECONDS / len(sources.SYMBOLS)))
+
+
+async def record_chain_quotes(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> None:
+    """Ask the pool what a one dollar ticket buys, for both Sides, through the entry window.
+
+    This is the price a Paper Trade is scored at. Asking the exchange's indexer instead
+    cannot work: it reports nothing for a Round that has already been traded, and Reserves
+    reconstructed from that silence price every Fill as though nobody had traded at all.
+
+    Failing to reach the chain costs nothing. A missing quote falls back to the local rule
+    and says so, which is a worse price than the truth but an honest one about itself.
+    """
+    from .chain import Arbitrum
+
+    chain = Arbitrum()
+    while not stop.is_set():
+        for symbol in sources.SYMBOLS:
+            if stop.is_set():
+                return
+            try:
+                await _quote_one(ingest, chain, symbol)
+            except Exception:  # a quote must never end the process
+                ingest.conn.rollback()
+                log.exception("chain quote failed for %s", symbol)
+        await _sleep(stop, sources.jittered(QUOTE_EVERY_SECONDS))
+
+
+async def _quote_one(ingest: Ingest, chain, symbol: str) -> None:
+    now = int(time.time())
+    row = ingest.conn.execute(
+        """
+        SELECT ending, pool_address, outcome_up, outcome_down FROM rounds
+         WHERE symbol = ? AND winner IS NULL AND pool_address IS NOT NULL
+           AND outcome_up IS NOT NULL AND outcome_down IS NOT NULL
+           AND ending > ? AND ending <= ?
+         ORDER BY ending LIMIT 1
+        """,
+        (symbol, now, now + QUOTE_WINDOW_SECONDS),
+    ).fetchone()
+    if row is None:
+        return
+    loop = asyncio.get_running_loop()
+    for side, outcome in (("UP", row["outcome_up"]), ("DOWN", row["outcome_down"])):
+        quoted = await loop.run_in_executor(None, chain.quote, row["pool_address"], outcome,
+                                            QUOTE_GROSS)
+        if quoted is None:
+            continue
+        ingest.record_chain_quote(symbol, row["ending"], side, int(time.time()),
+                                  QUOTE_GROSS, quoted.shares, quoted.fees)
 
 
 async def verify_pricing(ingest: Ingest, stop: asyncio.Event) -> None:
@@ -301,6 +357,7 @@ async def run(db_path: str = DB_PATH, duration: Optional[float] = None) -> None:
         asyncio.ensure_future(backfill_rounds(ingest, graph, stop)),
         asyncio.ensure_future(reconcile_reserves(ingest, graph, stop)),
         asyncio.ensure_future(close_out_rounds(ingest, stop)),
+        asyncio.ensure_future(record_chain_quotes(ingest, graph, stop)),
         asyncio.ensure_future(verify_pricing(ingest, stop)),
     ]
     if duration is not None:
