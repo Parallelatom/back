@@ -92,11 +92,54 @@ def report(ledger_path, rpc=None, now=None):
         conn.close()
 
 
+def break_even(shares_micro):
+    """The Hit Rate this fill must beat. A win pays the shares less the stake; a loss
+    costs the stake whole, so the price paid per share is the whole economics."""
+    shares = shares_micro / 1e6
+    return None if shares <= 0 else 1 / shares
+
+
+def fills(ledger_path):
+    """Every confirmed fill against what was quoted for it.
+
+    A fill below the quoted minimum halts the runner, and this is how to judge whether
+    that halt should be lifted: not by how far the fill missed, but by what Hit Rate the
+    shares it bought would have to beat.
+    """
+    conn = read_only(ledger_path)
+    try:
+        lines = ["halt flag:"]
+        flags = conn.execute("SELECT name, value FROM live_flags").fetchall()
+        lines += [f"  {r['name']}: {r['value']}" for r in flags] or ["  none"]
+        lines.append("\nfills below the quoted minimum:")
+        short = conn.execute(
+            "SELECT id, state, quoted_shares, minimum_shares, shares FROM positions"
+            " WHERE shares > 0 AND shares < minimum_shares ORDER BY updated_at").fetchall()
+        for row in short:
+            quoted, got = row["quoted_shares"] / 1e6, row["shares"] / 1e6
+            lines.append(
+                f"  {row['id'][:12]} {row['state']:9} quoted {quoted:.6f} "
+                f"| got {got:.6f} | {(got / quoted - 1) * 100:+.2f}% vs quote "
+                f"| needs {break_even(row['shares']):.1%} to break even")
+        if not short:
+            lines.append("  none")
+        lines.append("\nevery confirmed fill:")
+        for row in conn.execute("SELECT shares, COUNT(*) n FROM positions WHERE shares > 0"
+                                " GROUP BY shares ORDER BY shares"):
+            lines.append(f"  {row['shares'] / 1e6:.6f} shares/USDC  x{row['n']}"
+                         f"  (needs {break_even(row['shares']):.1%})")
+        return "\n".join(lines)
+    finally:
+        conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ledger", required=True)
+    parser.add_argument("--fills", action="store_true",
+                        help="report fill quality and the halt flag instead")
     args = parser.parse_args()
-    print(report(args.ledger))
+    print(fills(args.ledger) if args.fills else report(args.ledger))
 
 
 if __name__ == "__main__":

@@ -8,7 +8,8 @@ import sqlite3
 
 import pytest
 
-from strategy_lab.execution.positions import CLAIM_DELAY_SECONDS, report, waiting_on
+from strategy_lab.execution.positions import (CLAIM_DELAY_SECONDS, break_even, report,
+                                             waiting_on)
 
 NOW = 1789828800
 BUY = {"outcome_up": "0xaa", "outcome_down": "0xbb"}
@@ -80,3 +81,15 @@ class TestReading:
         from strategy_lab.execution.positions import read_only
         with pytest.raises(sqlite3.OperationalError):
             read_only(ledger).execute("DELETE FROM positions")
+
+
+class TestFillQuality:
+    def test_the_break_even_rate_is_the_inverse_of_the_shares_bought(self):
+        assert break_even(1_314_422) == pytest.approx(0.760790, abs=1e-6)
+        assert break_even(1_050_199) == pytest.approx(0.952200, abs=1e-6)
+
+    def test_a_worse_fill_demands_a_higher_hit_rate(self):
+        assert break_even(1_050_199) > break_even(1_314_422)
+
+    def test_no_shares_has_no_break_even_rather_than_a_division(self):
+        assert break_even(0) is None
