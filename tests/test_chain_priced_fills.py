@@ -183,3 +183,39 @@ class TestAnUnupgradedDatabase:
         ingest.conn.commit()
 
         assert "<!doctype html>" in render_page(ingest.conn)
+
+
+class TestAColumnAddedAfterTheFact:
+    """CREATE TABLE IF NOT EXISTS leaves an existing table alone, columns and all."""
+
+    def _rollback_to_the_shape_before_price(self, conn):
+        conn.execute("DROP TABLE chain_quotes")
+        conn.execute("""CREATE TABLE chain_quotes (
+            symbol TEXT NOT NULL, round_ending INTEGER NOT NULL, side TEXT NOT NULL,
+            ts INTEGER NOT NULL, gross INTEGER NOT NULL, shares INTEGER NOT NULL,
+            fees INTEGER NOT NULL, code_version TEXT NOT NULL,
+            PRIMARY KEY (symbol, round_ending, side, ts))""")
+        conn.commit()
+
+    def test_initialise_adds_the_column_to_a_table_that_predates_it(self, ingest):
+        from strategy_lab.db import initialise
+        self._rollback_to_the_shape_before_price(ingest.conn)
+
+        initialise(ingest.conn)
+        columns = {row[1] for row in ingest.conn.execute("PRAGMA table_info(chain_quotes)")}
+        assert "price" in columns
+
+    def test_scoring_survives_the_older_table(self, ingest):
+        from strategy_lab.db import initialise
+        a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
+        self._rollback_to_the_shape_before_price(ingest.conn)
+
+        initialise(ingest.conn)
+        assert len(replay(ingest.conn, symbol=BTC, strategies=[ALWAYS_UP])["Always Up"].trades) == 1
+
+    def test_running_initialise_twice_is_harmless(self, ingest):
+        from strategy_lab.db import initialise
+        initialise(ingest.conn)
+        initialise(ingest.conn)
+        columns = [row[1] for row in ingest.conn.execute("PRAGMA table_info(chain_quotes)")]
+        assert columns.count("price") == 1

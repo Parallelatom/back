@@ -172,6 +172,17 @@ def initialise(conn: sqlite3.Connection) -> None:
         # Schema and catch-up must commit together: a restart halfway through an upgrade
         # must not mistake the new bookkeeping table for a completed migration.
         conn.executescript("BEGIN;\n" + SCHEMA)
+        # CREATE TABLE IF NOT EXISTS leaves an existing table exactly as it was, so a
+        # column added to the schema never reaches a database that predates it. Anything
+        # reading the new column then fails against the old table — including the
+        # dashboard, which cannot repair what it mounts read-only.
+        for table, column, kind in (("chain_quotes", "price", "REAL"),):
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+            ).fetchone():
+                continue
+            if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
         if upgrading:
             conn.execute(
                 "INSERT INTO reconstruction_pending SELECT symbol, MIN(ts), MAX(ts) "
