@@ -406,13 +406,15 @@ def _pricing_note(results) -> str:
     chain = max((result.chain_priced for result in results.values()), default=0)
     if not scored or chain == scored:
         return ""
+    rest = ("the local rule, run on the Reserves the exchange reports — and where it "
+            "reports none, which is what it does for a Round already traded, the Round is "
+            "priced as though nobody had traded it")
     if not chain:
-        return ('<p class="caveat">No Fill here was priced by the contract. Every one ran '
-                "on the local rule, which reads a traded pool as untouched and so prices "
-                "at the best price available. Read the Hit Rate; the money is optimistic.</p>")
+        return (f'<p class="caveat">No Fill here was priced by the contract. Every one ran on '
+                f"{rest}. Read the Hit Rate; the money is the part to doubt.</p>")
     return (f'<p class="caveat">{chain} of {scored} Fills were priced by the contract; the '
-            "rest ran on the local rule, which prices a traded pool as untouched. The curve "
-            "spans both and is two measurements rather than one trend.</p>")
+            f"rest ran on {rest}. The curve spans both and is two measurements rather than "
+            "one trend.</p>")
 
 
 def _pricing_alarm(conn) -> str:

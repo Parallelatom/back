@@ -94,7 +94,7 @@ class TestSayingWhichPricedIt:
     def test_a_page_with_no_contract_prices_says_the_money_is_optimistic(self, ingest):
         a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
         results = replay(ingest.conn, symbol=BTC, strategies=[ALWAYS_UP])
-        assert "optimistic" in _pricing_note(results)
+        assert "the money is the part to doubt" in _pricing_note(results)
 
     def test_a_page_priced_entirely_by_the_contract_says_nothing(self, ingest):
         a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
