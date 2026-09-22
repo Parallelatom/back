@@ -46,6 +46,15 @@ def winner_on_chain(rpc, position, buy):
 
 
 def waiting_on(position, buy, now, winner):
+    if position["state"] == "REDEEM_PENDING":
+        # This one stops everything: a position that is neither a confirmed open Round
+        # nor finished holds the entry slot, so the runner buys nothing until it clears.
+        reason = f" ({position['error']})" if position.get("error") else ""
+        return ("claim submitted but not confirmed" + reason + " — BLOCKS ALL NEW ENTRIES."
+                " Clear it with --retry-claim, which rebroadcasts the transaction already"
+                " signed rather than signing another")
+    if position["state"] == "REDEEM_READY":
+        return "claim not yet submitted — the runner will send it on its next pass"
     if position["state"] in ("BUY_PENDING", "BUY_UNKNOWN"):
         return ("purchase not confirmed — reconcile with --attach-buy once the "
                 "transaction is known")

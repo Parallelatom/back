@@ -93,3 +93,25 @@ class TestFillQuality:
 
     def test_no_shares_has_no_break_even_rather_than_a_division(self):
         assert break_even(0) is None
+
+
+class TestTheStateThatBlocksEverything:
+    """A pending claim is neither an open Round nor a finished one, so it holds the entry
+    slot and the runner buys nothing until a person clears it. The report has to say so."""
+
+    def test_a_pending_claim_says_it_blocks_new_entries(self):
+        answer = waiting_on({**position(state="REDEEM_PENDING"), "error": None}, BUY, NOW, "UP")
+        assert "BLOCKS ALL NEW ENTRIES" in answer
+        assert "--retry-claim" in answer
+
+    def test_it_repeats_the_error_that_was_recorded(self):
+        stuck = {**position(state="REDEEM_PENDING"), "error": "SetupError"}
+        assert "SetupError" in waiting_on(stuck, BUY, NOW, "UP")
+
+    def test_it_says_the_transaction_is_rebroadcast_not_resigned(self):
+        answer = waiting_on({**position(state="REDEEM_PENDING"), "error": None}, BUY, NOW, "UP")
+        assert "already" in answer and "signed" in answer
+
+    def test_a_claim_not_yet_sent_is_not_a_fault(self):
+        answer = waiting_on(position(state="REDEEM_READY"), BUY, NOW, "UP")
+        assert "next pass" in answer and "BLOCKS" not in answer
