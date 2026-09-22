@@ -24,9 +24,51 @@ def meta():
     return RoundMeta("BTC", T0, T0 + 900, 100.0, "0xpool", "0xup", "0xdown")
 
 
+def _one_verification(ingest, monkeypatch, reachable):
+    """Drive exactly one pricing check and hand back the thread ids it used."""
+    owner = threading.get_ident()
+    calls = []
+
+    class Chain:
+        def quote(self, pool, outcome, gross):
+            calls.append(threading.get_ident())
+            return chain.Quote(1_314_422, 17_000, 0) if reachable else None
+
+    monkeypatch.setattr(chain, "Arbitrum", Chain)
+
+    async def one_cycle():
+        stop = asyncio.Event()
+
+        async def sleep(stop, seconds):
+            if seconds == collector.VERIFY_EVERY_SECONDS:
+                stop.set()
+
+        monkeypatch.setattr(collector, "_sleep", sleep)
+        await collector.verify_pricing(ingest, stop)
+
+    asyncio.run(one_cycle())
+    return owner, calls
+
+
+def test_a_seeded_pool_is_not_treated_as_a_disagreement(ingest, monkeypatch):
+    """Every Round opens with an even pool whether or not anyone looked at it, so the
+    check would otherwise measure how far the pool has been traded and call that a fault
+    in the pricing rule — lighting the alarm permanently."""
+    ingest.observe_round(meta(), now=T0)
+
+    _owner, calls = _one_verification(ingest, monkeypatch, reachable=True)
+
+    assert len(calls) == 1
+    row = ingest.conn.execute("SELECT * FROM quote_checks").fetchone()
+    assert row["agrees"] is None
+    assert "seeded opening pool" in row["note"]
+
+
 @pytest.mark.parametrize("reachable", [True, False])
 def test_daily_verification_records_result_without_moving_sqlite_to_worker(ingest, monkeypatch, reachable):
     ingest.observe_round(meta(), now=T0)
+    # An observed pool, so there is something the rule can actually be checked against.
+    ingest.apply_remote_reserves(meta().pool_address, up=900_000, down=1_100_000, ts=T0 + 5)
     owner = threading.get_ident()
     calls = []
 
@@ -51,7 +93,9 @@ def test_daily_verification_records_result_without_moving_sqlite_to_worker(inges
     assert len(calls) == 1 and calls[0] != owner
     row = ingest.conn.execute("SELECT * FROM quote_checks").fetchone()
     assert row is not None
-    assert row["agrees"] == (1 if reachable else None)
+    # Reaching the chain produces a verdict either way; failing to reach it produces none.
+    # Which verdict is the pricing rule's business, not this test's.
+    assert (row["agrees"] is not None) == reachable
 
 
 def test_polling_recovers_after_a_recording_failure(ingest, monkeypatch, caplog):

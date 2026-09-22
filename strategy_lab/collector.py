@@ -173,7 +173,7 @@ async def _verify_one(ingest: Ingest, chain, symbol: str) -> None:
     gross = 1_000_000
     row = ingest.conn.execute(
         """
-        SELECT r.pool_address, r.outcome_up, v.q_up, v.q_down
+        SELECT r.pool_address, r.outcome_up, v.q_up, v.q_down, v.source
           FROM rounds r
           JOIN reserves v ON v.symbol = r.symbol AND v.round_ending = r.ending
          WHERE r.symbol = ? AND r.winner IS NULL AND r.pool_address IS NOT NULL
@@ -188,15 +188,25 @@ async def _verify_one(ingest: Ingest, chain, symbol: str) -> None:
     quoted = await asyncio.get_running_loop().run_in_executor(
         None, chain.quote, row["pool_address"], row["outcome_up"], gross
     )
+    # A Round nobody has reported Reserves for still carries the even pool every Round is
+    # seeded with (ADR-0004). Comparing that against the chain tests nothing about the
+    # pricing rule — it measures how much the pool has been traded since it opened, which
+    # is a different fact and one the page already carries per panel. Recording it as a
+    # disagreement would leave the alarm lit permanently, and an alarm that is always on
+    # is one nobody reads.
+    seeded = row["source"] == "seed"
+    note = ("could not reach the chain" if not quoted else
+            "local Reserves are the seeded opening pool; nothing observed to compare"
+            if seeded else None)
     agreed = ingest.record_quote_check(
         row["pool_address"], gross=gross,
         local_shares=local.shares, local_fees=local.fees,
-        chain_shares=quoted.shares if quoted else None,
-        chain_fees=quoted.fees if quoted else None,
+        chain_shares=None if seeded else (quoted.shares if quoted else None),
+        chain_fees=None if seeded else (quoted.fees if quoted else None),
         ts=int(time.time()),
-        note=None if quoted else "could not reach the chain",
+        note=note,
     )
-    if quoted and not agreed:
+    if quoted and not seeded and not agreed:
         log.error(
             "pricing disagrees with the contract for %s: local %s shares / %s fees, "
             "chain %s shares / %s fees",
