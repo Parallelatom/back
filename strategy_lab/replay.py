@@ -14,7 +14,8 @@ import sqlite3
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (Callable, Dict, List, Mapping, NamedTuple, Optional,
+                    Sequence, Tuple)
 
 from .amm import SCALE, Reserves, fill, marginal_price
 
@@ -62,7 +63,11 @@ class RoundRecord:
     reserves: Sequence[Tuple[int, Reserves]]
     # What the pool contract said a ticket buys, per Side, oldest first. Empty for every
     # Round recorded before the Collector began asking it.
-    quotes: Mapping[str, Sequence[Tuple[int, Tuple[int, int]]]] = field(default_factory=dict)
+    quotes: Mapping[str, Sequence[Tuple[int, ChainQuote]]] = field(default_factory=dict)
+    # Moments the pool was actually observed. Every Round is seeded with an even opening
+    # pool whether or not anyone looked (ADR-0004), so the presence of Reserves says
+    # nothing on its own about whether the pool was seen.
+    pool_observed: Sequence[int] = field(default_factory=tuple)
 
     def price_at(self, moment: int) -> Optional[float]:
         stamps = [ts for ts, _ in self.prices]
@@ -85,6 +90,18 @@ class RoundRecord:
         stamps = [ts for ts, _ in series]
         index = bisect_right(stamps, moment) - 1
         return series[index][1] if index >= 0 else None
+
+    def pool_seen_at(self, moment: int) -> bool:
+        """Whether anything at all was observed about the pool by then.
+
+        `reserves_at` answers an untouched pool when nothing was recorded, which is the
+        right default for pricing a Fill and the wrong one for deciding whether to take it:
+        a Strategy that reads the pool would be reacting to an assumption. This is how such
+        a Strategy tells the difference between a quiet pool and an unobserved one.
+        """
+        if any(self.quote_at(side, moment) for side in ("UP", "DOWN")):
+            return True
+        return bisect_right(list(self.pool_observed), moment) - 1 >= 0
 
     def delta_pct(self, moment: int) -> Optional[float]:
         price = self.price_at(moment)
@@ -169,6 +186,18 @@ def _enter_at_window_open(side: str) -> Callable[[RoundRecord], Optional[Entry]]
 
 def _window(record: RoundRecord) -> Tuple[int, int]:
     return record.ending - WINDOW_OPENS, record.ending - WINDOW_CLOSES
+
+
+class ChainQuote(NamedTuple):
+    """What the pool contract answered, at a moment it was asked."""
+
+    shares: int
+    fees: int
+    price: Optional[float]
+
+    @property
+    def price_per_share(self) -> float:
+        return (STAKE_MICRO / self.shares) if self.shares else 0.0
 
 
 def _side_of(delta: float) -> str:
@@ -294,8 +323,18 @@ def lock_rider(max_price: float = LOCK_RIDER_MAX_PRICE) -> Strategy:
         if delta is None:
             return None
         side = _side_of(delta)
-        got = fill(record.reserves_at(moment), side, STAKE_MICRO)
-        if not got.shares or got.price_per_share > max_price:
+        quoted = record.quote_at(side, moment)
+        if quoted is not None:
+            price_per_share, shares = quoted.price_per_share, quoted.shares
+        elif record.pool_seen_at(moment):
+            got = fill(record.reserves_at(moment), side, STAKE_MICRO)
+            price_per_share, shares = got.price_per_share, got.shares
+        else:
+            # Nothing was observed about the pool then, and this rule is entirely a
+            # judgement about the pool. Guessing it an even one would invent the very
+            # cheapness being tested for.
+            return None
+        if not shares or price_per_share > max_price:
             return None
         return Entry(at=moment, side=side)
 
@@ -326,10 +365,17 @@ def contrarian_fill(
             if delta is None or abs(delta) <= threshold:
                 continue
             side = _side_of(delta)
-            reserves = record.reserves_at(ts)
-            implied = marginal_price(reserves)
-            if side == "DOWN":
-                implied = 1 - implied
+            quoted = record.quote_at(side, ts)
+            if quoted is not None and quoted.price is not None:
+                implied = quoted.price
+            elif record.pool_seen_at(ts):
+                implied = marginal_price(record.reserves_at(ts))
+                if side == "DOWN":
+                    implied = 1 - implied
+            else:
+                # The whole premise is that the pool is selling this Side cheap. Without
+                # having seen the pool there is no such claim to test.
+                continue
             if implied < max_marginal:
                 return Entry(at=ts, side=side)
         return None
@@ -388,8 +434,9 @@ def load_rounds(
         prices_by_round[observation["ending"]].append((observation["ts"], observation["price"]))
 
     reserves_by_round = defaultdict(list)
+    observed_by_round = defaultdict(list)
     for observation in conn.execute(
-        "SELECT r.ending, v.ts, v.q_up, v.q_down FROM rounds r JOIN reserves v "
+        "SELECT r.ending, v.ts, v.q_up, v.q_down, v.source FROM rounds r JOIN reserves v "
         "ON v.symbol = r.symbol AND v.round_ending = r.ending "
         + where + "ORDER BY r.ending, v.ts, v.rowid",
         (symbol,),
@@ -397,6 +444,8 @@ def load_rounds(
         reserves_by_round[observation["ending"]].append(
             (observation["ts"], Reserves(up=observation["q_up"], down=observation["q_down"]))
         )
+        if observation["source"] != "seed":
+            observed_by_round[observation["ending"]].append(observation["ts"])
 
     quotes_by_round = defaultdict(lambda: defaultdict(list))
     # The dashboard opens the recordings read-only and so cannot create this table; a
@@ -406,13 +455,15 @@ def load_rounds(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chain_quotes'"
     ).fetchone() is not None
     for observation in conn.execute(
-        "SELECT r.ending, q.side, q.ts, q.shares, q.fees FROM rounds r JOIN chain_quotes q "
+        "SELECT r.ending, q.side, q.ts, q.shares, q.fees, q.price FROM rounds r "
+        "JOIN chain_quotes q "
         "ON q.symbol = r.symbol AND q.round_ending = r.ending "
         + where + "ORDER BY r.ending, q.ts",
         (symbol,),
     ) if has_quotes else ():
         quotes_by_round[observation["ending"]][observation["side"]].append(
-            (observation["ts"], (observation["shares"], observation["fees"]))
+            (observation["ts"], ChainQuote(observation["shares"], observation["fees"],
+                                           observation["price"]))
         )
 
     records = []
@@ -428,6 +479,7 @@ def load_rounds(
                 prices=prices_by_round[row["ending"]],
                 reserves=reserves_by_round[row["ending"]],
                 quotes=dict(quotes_by_round[row["ending"]]),
+                pool_observed=tuple(observed_by_round[row["ending"]]),
             )
         )
     return records
@@ -479,7 +531,7 @@ def _settle(record: RoundRecord, entry: Entry) -> PaperTrade:
     quoted = record.quote_at(entry.side, entry.at)
     won = entry.side == record.winner
     if quoted is not None:
-        shares, _fees = quoted
+        shares = quoted.shares
         return PaperTrade(
             round_ending=record.ending,
             entered_at=entry.at,

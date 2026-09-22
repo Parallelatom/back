@@ -425,7 +425,8 @@ class Ingest:
             )
 
     def record_chain_quote(self, symbol: str, round_ending: int, side: str, ts: int,
-                           gross: int, shares: int, fees: int) -> None:
+                           gross: int, shares: int, fees: int,
+                           price: Optional[float] = None) -> None:
         """Write down what the contract says a ticket buys, at the moment it said it.
 
         Kept whole and never overwritten: a Fill is scored at the moment a Strategy chose,
@@ -433,11 +434,13 @@ class Ingest:
         """
         if side not in ("UP", "DOWN") or gross <= 0 or shares < 0 or fees < 0:
             raise ValueError("a quote needs a Side, a positive ticket and no negative parts")
+        if price is not None and not 0 <= price <= 1:
+            raise ValueError("a Side's price is a probability between zero and one")
         self.conn.execute(
             """INSERT OR IGNORE INTO chain_quotes
-               (symbol, round_ending, side, ts, gross, shares, fees, code_version)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (symbol, round_ending, side, ts, gross, shares, fees, self.code_version),
+               (symbol, round_ending, side, ts, gross, shares, fees, price, code_version)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (symbol, round_ending, side, ts, gross, shares, fees, price, self.code_version),
         )
         self.conn.commit()
 

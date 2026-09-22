@@ -125,6 +125,9 @@ CREATE TABLE IF NOT EXISTS chain_quotes (
     gross        INTEGER NOT NULL,
     shares       INTEGER NOT NULL,
     fees         INTEGER NOT NULL,
+    -- The Side's marginal price, which is what a Strategy reading the pool reacts to.
+    -- Nullable: the quote is the part a Fill needs, and a missed price must not cost it.
+    price        REAL,
     code_version TEXT    NOT NULL,
     PRIMARY KEY (symbol, round_ending, side, ts)
 );

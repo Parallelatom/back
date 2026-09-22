@@ -139,8 +139,11 @@ async def _quote_one(ingest: Ingest, chain, symbol: str) -> None:
                                             QUOTE_GROSS)
         if quoted is None:
             continue
+        # The marginal price is what a Strategy reading the pool reacts to, and it is a
+        # separate question from what a ticket buys. Losing it must not lose the quote.
+        price = await loop.run_in_executor(None, chain.price, row["pool_address"], outcome)
         ingest.record_chain_quote(symbol, row["ending"], side, int(time.time()),
-                                  QUOTE_GROSS, quoted.shares, quoted.fees)
+                                  QUOTE_GROSS, quoted.shares, quoted.fees, price)
 
 
 async def verify_pricing(ingest: Ingest, stop: asyncio.Event) -> None:

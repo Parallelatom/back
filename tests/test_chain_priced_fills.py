@@ -61,7 +61,7 @@ class TestNotReachingForward:
         record = load_rounds(ingest.conn, BTC)[0]
 
         assert record.quote_at("UP", ENDING - 300) is None
-        assert record.quote_at("UP", ENDING - 10) == (1_050_199, 17_000)
+        assert record.quote_at("UP", ENDING - 10)[:2] == (1_050_199, 17_000)
 
     def test_the_quote_in_force_is_the_most_recent_one_before_the_moment(self, ingest):
         a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)

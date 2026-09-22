@@ -7,7 +7,6 @@ entry rule that ignores the fill is a rule that buys at any price.
 """
 import pytest
 
-from strategy_lab.amm import OPENING_RESERVE
 from strategy_lab.db import connect, initialise
 from strategy_lab.ingest import Ingest, RoundMeta
 from strategy_lab.replay import (
@@ -29,6 +28,18 @@ def ingest():
     conn = connect(":memory:")
     initialise(conn)
     return Ingest(conn, code_version="testver")
+
+
+def a_chain_quote(ingest, ending=T0 + GRID, side="UP", at=None, shares=1_314_422,
+                  price=0.5):
+    """The contract answering about the pool, which is recorded whether or not it moved.
+
+    The Reserves table cannot stand in for this: `apply_remote_reserves` writes only when
+    the answer disagrees with what is held, so confirming a pool is still even leaves no
+    trace of anyone having looked.
+    """
+    ingest.record_chain_quote(BTC, ending, side, at or (ending - GRID + 10), 1_000_000,
+                              shares, 17_000, price)
 
 
 def a_round(ingest, price, ending=T0 + GRID, winner=None, reserves=None, at=None):
@@ -61,12 +72,14 @@ def trades_of(ingest, strategy):
 class TestLockRider:
     def test_it_enters_as_late_as_the_contract_allows(self, ingest):
         a_round(ingest, price=100.5)
+        a_chain_quote(ingest)
 
         (trade,) = trades_of(ingest, LOCK_RIDER)
         assert (T0 + GRID) - trade.entered_at == WINDOW_CLOSES
 
     def test_it_backs_whichever_side_is_ahead(self, ingest):
         a_round(ingest, price=99.5)
+        a_chain_quote(ingest, side="DOWN")
 
         (trade,) = trades_of(ingest, LOCK_RIDER)
         assert trade.side == "DOWN"
@@ -74,14 +87,24 @@ class TestLockRider:
     def test_it_needs_no_minimum_distance(self, ingest):
         """Its whole premise is that by the last minute the answer is nearly settled."""
         a_round(ingest, price=100.001)
+        a_chain_quote(ingest)
 
         assert len(trades_of(ingest, LOCK_RIDER)) == 1
 
-    def test_an_untouched_pool_is_bought(self, ingest):
+    def test_a_pool_seen_to_be_even_is_bought(self, ingest):
         a_round(ingest, price=100.5)
+        a_chain_quote(ingest)
 
         (trade,) = trades_of(ingest, LOCK_RIDER)
         assert trade.marginal_price == 0.5
+
+    def test_a_pool_nobody_looked_at_is_not_bought(self, ingest):
+        """Every Round is seeded with an even pool whether or not anyone looked, so an
+        even pool is not evidence of an untouched one. This rule is a judgement about the
+        pool, and there is nothing here to judge."""
+        a_round(ingest, price=100.5)
+
+        assert trades_of(ingest, LOCK_RIDER) == []
 
     def test_it_refuses_a_side_that_others_have_already_made_dear(self, ingest):
         """Someone got there first. Winning from here returns almost nothing."""
@@ -104,9 +127,16 @@ class TestLockRider:
         assert len(trades_of(ingest, permissive)) == 1
 
     def test_a_pool_moved_after_the_entry_moment_does_not_count(self, ingest):
+        """The later reading is not reached for — and it is also the only reading there
+        is, so by the entry moment the pool had not been seen at all."""
         a_round(ingest, price=100.5, reserves=UP_IS_DEAR, at=T0 + GRID - 10)
 
-        assert len(trades_of(ingest, LOCK_RIDER)) == 1
+        assert trades_of(ingest, LOCK_RIDER) == []
+
+    def test_a_pool_seen_before_the_entry_moment_does_count(self, ingest):
+        a_round(ingest, price=100.5, reserves=UP_IS_DEAR, at=T0 + GRID - WINDOW_CLOSES - 5)
+
+        assert trades_of(ingest, LOCK_RIDER) == []
 
 
 class TestContrarianFill:
@@ -155,3 +185,35 @@ class TestContrarianFill:
 
         (trade,) = trades_of(ingest, CONTRARIAN_FILL)
         assert trade.pnl == -1.0
+
+
+class TestJudgingThePoolWithoutHavingSeenIt:
+    """Both rules are judgements about the pool, so both need one to have been observed.
+
+    Every Round is seeded with an even pool without anyone looking (ADR-0004), and a
+    confirmation that it is still even writes nothing, so neither the presence of Reserves
+    nor their evenness shows that the pool was seen.
+    """
+
+    def test_contrarian_fill_does_not_buy_a_cheapness_it_never_observed(self, ingest):
+        a_round(ingest, price=100.5)
+
+        assert trades_of(ingest, CONTRARIAN_FILL) == []
+
+    def test_contrarian_fill_buys_once_the_contract_has_shown_the_price(self, ingest):
+        a_round(ingest, price=100.5)
+        a_chain_quote(ingest, price=0.2, shares=4_000_000)
+
+        assert len(trades_of(ingest, CONTRARIAN_FILL)) == 1
+
+    def test_contrarian_fill_still_refuses_a_side_the_contract_prices_dear(self, ingest):
+        a_round(ingest, price=100.5)
+        a_chain_quote(ingest, price=0.9, shares=1_100_000)
+
+        assert trades_of(ingest, CONTRARIAN_FILL) == []
+
+    def test_an_observation_after_the_moment_is_not_reached_back_for(self, ingest):
+        a_round(ingest, price=100.5)
+        a_chain_quote(ingest, price=0.2, shares=4_000_000, at=T0 + GRID - 1)
+
+        assert trades_of(ingest, CONTRARIAN_FILL) == []
