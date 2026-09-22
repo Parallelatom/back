@@ -495,6 +495,55 @@ class LiveBroker:
             self.ledger.conn.execute("UPDATE live_ops SET tx_hash=? WHERE position_id=? AND operation='buy' AND tx_hash IS NULL",
                                     (tx_hash, identity))
 
+    def attach_claim(self, identity, tx_hash):
+        """Adopt a claim made outside the runner, once the chain proves it.
+
+        submit_redeem refuses while the share balance disagrees with the position and
+        tells you to reconcile, but there was no way to. Meanwhile the Round sits in
+        REDEEM_PENDING holding the entry slot, and retry_claim would rebroadcast bytes
+        that can no longer succeed — a reverted receipt halts the runner outright.
+
+        Nothing is taken on trust. The hash must mine a canonical claim that burned this
+        position's shares and paid this wallet, which is the same proof the runner
+        demands of its own transaction.
+        """
+        position = self.ledger.get(identity)
+        if not position or position["state"] != "REDEEM_PENDING":
+            raise ValueError("expected a pending claim")
+        buy = self.op(position, "buy")
+        if not buy:
+            raise ValueError("no purchase on record to match a claim against")
+        tx_hash = hex_value(tx_hash, 32)
+        existing = self.op(position, "redeem")
+        if existing and existing["tx_hash"]:
+            if existing["tx_hash"] == tx_hash:
+                raise ValueError("this claim is already attached")
+            # Replacing a hash that did mine would discard a real receipt.
+            if self.rpc.mined(existing["tx_hash"]) is not None:
+                raise ValueError("the recorded claim already mined; let the runner read it")
+        elif self.ledger.conn.execute(
+                "SELECT 1 FROM live_ops WHERE tx_hash = ?", (tx_hash,)).fetchone():
+            raise ValueError("hash already used")
+        receipt = self._receipt(position, "redeem",
+                               {**(existing or {"share_token": buy["share_token"]}),
+                                "tx_hash": tx_hash})
+        if receipt is None or not receipt.success:
+            raise ValueError("hash must prove a canonical mined matching claim")
+        if receipt.shares != position["shares"] or receipt.amount <= 0:
+            raise ValueError("claim burned a different position size")
+        with self.ledger.conn:
+            if existing:
+                self.ledger.conn.execute(
+                    "UPDATE live_ops SET tx_hash = ?, raw_tx = NULL WHERE position_id = ?"
+                    " AND operation = 'redeem'", (tx_hash, identity))
+            else:
+                self.ledger.conn.execute(
+                    "INSERT INTO live_ops(position_id,operation,request,share_token,tx_hash)"
+                    " VALUES (?,'redeem',?,?,?)",
+                    (identity, json.dumps({"attached": "manual claim"}),
+                     buy["share_token"], tx_hash))
+        return receipt
+
     def retry_claim(self, identity):
         position = self.ledger.get(identity)
         if not position or position["state"] != "REDEEM_PENDING":

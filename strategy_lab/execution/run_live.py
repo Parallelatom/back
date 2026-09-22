@@ -38,6 +38,8 @@ def main():
     parser.add_argument("--log-interval", type=float, default=5, help="heartbeat seconds; new prices/states print immediately")
     parser.add_argument("--attach-buy", nargs=2, metavar=("POSITION_ID", "TX_HASH"))
     parser.add_argument("--retry-claim", metavar="POSITION_ID")
+    parser.add_argument("--attach-claim", nargs=2, metavar=("POSITION_ID", "TX_HASH"),
+                        help="adopt a claim made outside the runner, proved on chain")
     parser.add_argument("--reset-risk-session", action="store_true",
                         help="reset continuous-session loss/attempt counters after all positions close")
     args = parser.parse_args()
@@ -55,7 +57,8 @@ def main():
         source, destination = Path(args.recordings), Path(args.ledger)
         if source.resolve() == destination.resolve() or (source.exists() and destination.exists() and source.samefile(destination)):
             raise ValueError("live ledger cannot be Collector database")
-        if (args.attach_buy or args.retry_claim or args.reset_risk_session) and not args.execute:
+        if (args.attach_buy or args.attach_claim or args.retry_claim
+                or args.reset_risk_session) and not args.execute:
             raise ValueError("recovery actions require --execute")
         if args.reset_risk_session and (args.watch or args.continuous or args.overnight_hours is not None
                                         or args.until is not None or args.attach_buy or args.retry_claim):
@@ -92,6 +95,11 @@ def main():
             broker.start_until(int(stop_at.timestamp()))
         if args.attach_buy:
             broker.attach_buy(*args.attach_buy)
+        if args.attach_claim:
+            receipt = broker.attach_claim(*args.attach_claim)
+            print("CLAIM ATTACHED | shares=%.6f | returned=%.6f USDC | the runner will"
+                  " record it on its next pass"
+                  % (receipt.shares / 1e6, receipt.amount / 1e6), flush=True)
         if args.retry_claim:
             broker.retry_claim(args.retry_claim)
         if args.reset_risk_session:

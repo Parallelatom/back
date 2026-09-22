@@ -776,3 +776,67 @@ def test_unknown_cash_not_released_on_scan_failure_or_pool_debit(rig, monkeypatc
     engine.advance(END+301, rig.broker.settlement)
     assert rig.ledger.positions()[0]['state'] == 'BUY_UNKNOWN'
     assert rig.ledger.summary(rig.settings)['reserved_usd'] == 1
+
+
+MANUAL_HASH = "0x" + "77" * 32
+
+
+def _stuck_claim(rig):
+    """A won Round whose claim was submitted and never confirmed."""
+    engine, identity = buy(rig)
+    rig.rpc.winner = bytes.fromhex(UP[2:])
+    rig.rpc.lose_ack = True
+    with patch("strategy_lab.execution.live.time.time", return_value=END + 300):
+        engine.advance(END + 300, rig.broker.settlement)
+    engine.advance(END + 1, rig.broker.settlement)
+    assert rig.ledger.get(identity)["state"] == "REDEEM_PENDING"
+    return engine, identity
+
+
+class TestAdoptingAClaimMadeByHand:
+    """The runner cannot see a claim it did not send, and waits for a hash that will
+    never mine. Its own guard says to reconcile; this is the reconciling."""
+
+    def test_a_proved_claim_is_adopted_and_the_round_closes(self, rig):
+        engine, identity = _stuck_claim(rig)
+        rig.rpc.receipts[MANUAL_HASH] = receipt(rig.broker.wallet, MANUAL_HASH, "claim")
+
+        rig.broker.attach_claim(identity, MANUAL_HASH)
+        engine.advance(END + 2, rig.broker.settlement)
+
+        assert rig.ledger.get(identity)["state"] == "REDEEMED"
+        # Adopting a claim must never put a transaction on the wire.
+        assert len(rig.rpc.broadcasts) == 1
+
+    def test_a_hash_the_chain_cannot_prove_is_refused(self, rig):
+        _engine, identity = _stuck_claim(rig)
+
+        with pytest.raises(ValueError):
+            rig.broker.attach_claim(identity, MANUAL_HASH)
+        assert rig.ledger.get(identity)["state"] == "REDEEM_PENDING"
+
+    def test_a_claim_of_the_wrong_size_is_refused(self, rig):
+        _engine, identity = _stuck_claim(rig)
+        rig.rpc.receipts[MANUAL_HASH] = receipt(rig.broker.wallet, MANUAL_HASH, "claim",
+                                                shares=999_999)
+
+        with pytest.raises(ValueError):
+            rig.broker.attach_claim(identity, MANUAL_HASH)
+
+    def test_it_refuses_a_position_that_is_not_awaiting_a_claim(self, rig):
+        engine, identity = buy(rig)
+
+        with pytest.raises(ValueError):
+            rig.broker.attach_claim(identity, MANUAL_HASH)
+
+    def test_it_will_not_discard_a_recorded_claim_that_did_mine(self, rig):
+        engine, identity = _stuck_claim(rig)
+        # The runner's own transaction turns out to have mined after all.
+        sent = rig.ledger.conn.execute(
+            "SELECT tx_hash FROM live_ops WHERE position_id=? AND operation='redeem'",
+            (identity,)).fetchone()[0]
+        rig.rpc.receipts[sent] = receipt(rig.broker.wallet, sent, "claim")
+        rig.rpc.receipts[MANUAL_HASH] = receipt(rig.broker.wallet, MANUAL_HASH, "claim")
+
+        with pytest.raises(ValueError):
+            rig.broker.attach_claim(identity, MANUAL_HASH)
