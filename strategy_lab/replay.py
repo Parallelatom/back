@@ -155,6 +155,11 @@ class Result:
         return sum(1 for trade in self.trades if trade.priced_by == "chain")
 
     @property
+    def profit(self) -> float:
+        """What these Fills actually paid. The figure the other two only estimate."""
+        return sum(trade.pnl for trade in self.trades)
+
+    @property
     def break_even(self) -> Optional[float]:
         """The Hit Rate these Fills must beat, from the shares they actually bought.
 
@@ -162,6 +167,10 @@ class Result:
         threshold moves with the price paid: 1.314422 shares per USDC needs 76.1%, and
         1.050199 needs 95.2%. Held as one number it silently assumes every Fill was made
         against an untouched pool, which is the best price there is.
+
+        Read it as context and not as a verdict. Because it runs on the mean of every
+        Fill, a Strategy whose winners were filled worse than its losers can sit above
+        this line and still have lost money; `profit` is what actually happened.
         """
         if not self.trades:
             return None

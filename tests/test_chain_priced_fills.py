@@ -155,13 +155,13 @@ class TestTheBreakEvenLineFollowsThePrice:
         result = replay(ingest.conn, symbol=BTC, strategies=[ALWAYS_UP])["Always Up"]
         assert result.break_even == pytest.approx(1 / 2.890330, abs=1e-6)
 
-    def test_the_verdict_quotes_the_line_it_judged_against(self, ingest):
+    def test_the_verdict_quotes_the_line_as_context(self, ingest):
         from strategy_lab.render import _table
         from strategy_lab.replay import ALL_STRATEGIES
         a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
         a_quote(ingest, shares=2_890_330)
         results = replay(ingest.conn, symbol=BTC, strategies=ALL_STRATEGIES)
-        assert "above break-even (34.6%)" in _table(BTC, results, 0, 1)
+        assert "paid (break-even 34.6%)" in _table(BTC, results, 0, 1)
 
 
 class TestAnUnupgradedDatabase:
@@ -219,3 +219,52 @@ class TestAColumnAddedAfterTheFact:
         initialise(ingest.conn)
         columns = [row[1] for row in ingest.conn.execute("PRAGMA table_info(chain_quotes)")]
         assert columns.count("price") == 1
+
+
+class TestTheVerdictIsWhatWasPaid:
+    """A Hit Rate above the mean-fill line is not the same as having made money.
+
+    break_even runs on the mean of every Fill. A Strategy whose winners were filled worse
+    than its losers clears that line and still loses — seen for real on five Flip Follow
+    Fills that hit 60% against a 55.2% line and returned -0.44.
+    """
+
+    def _two_rounds(self, ingest, first_close, second_close):
+        a_round(ingest, symbol=BTC, ending=ENDING, close=first_close)
+        a_round(ingest, symbol=BTC, ending=ENDING + GRID, close=second_close)
+
+    def test_winning_cheaply_and_losing_dearly_is_called_a_loss(self, ingest):
+        # The Round it wins is filled badly; the Round it loses is filled well, which
+        # lifts the mean without ever paying anybody.
+        self._two_rounds(ingest, first_close=101.0, second_close=99.0)
+        ingest.record_chain_quote(BTC, ENDING, "UP", ENDING - 300, STAKE_MICRO,
+                                  1_050_199, 17_000)
+        ingest.record_chain_quote(BTC, ENDING + GRID, "UP", ENDING + GRID - 300,
+                                  STAKE_MICRO, 4_000_000, 17_000)
+        result = replay(ingest.conn, symbol=BTC, strategies=[ALWAYS_UP])["Always Up"]
+
+        assert result.hit_rate == 0.5
+        assert result.hit_rate > result.break_even    # clears the mean-fill line
+        assert result.profit < 0                      # and still lost money
+
+    def test_the_page_calls_that_did_not_pay(self, ingest):
+        from strategy_lab.render import _table
+        from strategy_lab.replay import ALL_STRATEGIES
+        self._two_rounds(ingest, first_close=101.0, second_close=99.0)
+        ingest.record_chain_quote(BTC, ENDING, "UP", ENDING - 300, STAKE_MICRO,
+                                  1_050_199, 17_000)
+        ingest.record_chain_quote(BTC, ENDING + GRID, "UP", ENDING + GRID - 300,
+                                  STAKE_MICRO, 4_000_000, 17_000)
+
+        results = replay(ingest.conn, symbol=BTC, strategies=ALL_STRATEGIES)
+        assert "did not pay" in _table(BTC, results, 0, 2)
+
+    def test_a_day_that_lost_money_is_dimmed(self, ingest):
+        from strategy_lab.render import periods_table
+        from strategy_lab.replay import ALL_STRATEGIES
+        self._two_rounds(ingest, first_close=101.0, second_close=99.0)
+        results = replay(ingest.conn, symbol=BTC, strategies=ALL_STRATEGIES)
+        _days, cells = periods_table(results, ALL_STRATEGIES)
+        record = cells["Always Up"]
+        assert all(len(cell) == 3 for cell in record.values())
+        assert sum(pnl for _w, _c, pnl in record.values()) < 0

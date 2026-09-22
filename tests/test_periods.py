@@ -63,8 +63,8 @@ class TestGroupingByDay:
 
         days, cells = rows_for(ingest)
         assert days == ["15 Sep", "16 Sep"]
-        assert cells[ALWAYS_UP.name]["15 Sep"] == (1, 1)
-        assert cells[ALWAYS_UP.name]["16 Sep"] == (0, 1)
+        assert cells[ALWAYS_UP.name]["15 Sep"][:2] == (1, 1)
+        assert cells[ALWAYS_UP.name]["16 Sep"][:2] == (0, 1)
 
     def test_a_day_the_strategy_sat_out_has_no_entry(self, ingest):
         a_round(ingest, ending=T0 + GRID, close=101.0)
@@ -151,14 +151,14 @@ class TestWhenTheDaysPileUp:
         self.a_run(ingest, PERIODS_SHOWN + 3)
 
         _, cells = rows_for(ingest)
-        assert cells[ALWAYS_UP.name][EARLIER] == (3, 3)
+        assert cells[ALWAYS_UP.name][EARLIER][:2] == (3, 3)
 
     def test_the_summary_mixes_wins_and_losses_from_the_whole_stretch(self, ingest):
         for n in range(PERIODS_SHOWN + 4):
             a_round(ingest, ending=T0 + n * DAY + GRID, close=101.0 if n % 2 else 99.0)
 
         _, cells = rows_for(ingest)
-        won, count = cells[ALWAYS_UP.name][EARLIER]
+        won, count, _pnl = cells[ALWAYS_UP.name][EARLIER]
         assert count == 4
         assert won == 2
 
@@ -175,7 +175,7 @@ class TestWhenTheDaysPileUp:
 
         days, cells = rows_for(ingest, strategies=(ALWAYS_UP, ALWAYS_DOWN))
         assert EARLIER in days
-        assert cells[ALWAYS_DOWN.name].get(EARLIER, (0, 0))[1] > 0  # it traded then too
+        assert cells[ALWAYS_DOWN.name].get(EARLIER, (0, 0, 0.0))[1] > 0  # it traded then too
 
     def test_the_page_labels_the_summary_column(self, ingest):
         self.a_run(ingest, PERIODS_SHOWN + 2)

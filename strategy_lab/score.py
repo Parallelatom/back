@@ -42,9 +42,11 @@ def render(conn, strategies=None) -> str:
             note = ""
             if result.ruined_at is not None:
                 note = f"ruined at Round {result.ruined_at}"
-            elif (result.hit_rate is not None and result.break_even is not None
-                  and result.hit_rate >= result.break_even):
-                note = f"above break-even ({result.break_even:.1%})"
+            elif result.trades:
+                line = ("" if result.break_even is None
+                        else f" (break-even {result.break_even:.1%})")
+                note = ("paid" if result.profit > 0 else
+                        "level" if result.profit == 0 else "did not pay") + line
             lines.append(
                 f"  {strategy.name:<16}{rate:>10}{len(result.trades):>9}"
                 f"{result.bankroll:>10.2f}   {note}"

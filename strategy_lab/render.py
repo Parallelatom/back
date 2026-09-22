@@ -87,8 +87,9 @@ def periods_table(results, strategies):
             date = _date_of(trade.round_ending)
             seen.add(date)
             day = day_of(trade.round_ending)
-            won, count = cells.setdefault(strategy.name, {}).get(day, (0, 0))
-            cells[strategy.name][day] = (won + (1 if trade.won else 0), count + 1)
+            won, count, pnl = cells.setdefault(strategy.name, {}).get(day, (0, 0, 0.0))
+            cells[strategy.name][day] = (won + (1 if trade.won else 0), count + 1,
+                                         pnl + trade.pnl)
     if not seen:
         return [], cells
     # A continuous run of days, so a day nothing was recorded on shows as a gap rather
@@ -107,8 +108,9 @@ def periods_table(results, strategies):
         totals = [record[day] for day in older if day in record]
         if totals:
             record[EARLIER] = (
-                sum(won for won, _ in totals),
-                sum(count for _, count in totals),
+                sum(won for won, _, _ in totals),
+                sum(count for _, count, _ in totals),
+                sum(pnl for _, _, pnl in totals),
             )
     return [EARLIER] + recent, cells
 
@@ -213,9 +215,14 @@ def _table(symbol: str, results, rebuilt: int, scoreable: int) -> str:
         note = ""
         if result.ruined_at is not None:
             note = "ruined"
-        elif (result.hit_rate is not None and result.break_even is not None
-              and result.hit_rate >= result.break_even):
-            note = f"above break-even ({result.break_even:.1%})"
+        elif result.trades:
+            # What the Fills actually paid, not whether the Hit Rate cleared the mean of
+            # their prices. A Strategy whose winners filled worse than its losers can be
+            # above that line and still have lost money.
+            line = ("" if result.break_even is None
+                    else f" (break-even {result.break_even:.1%})")
+            note = ("paid" if result.profit > 0 else
+                    "level" if result.profit == 0 else "did not pay") + line
         rows.append(
             f'<tr><td><span class="dot" style="background:{COLOURS[strategy.name]}"></span>'
             f"{html.escape(strategy.name)}</td>"
@@ -368,14 +375,15 @@ def _periods_section(results_by_symbol, symbols=None) -> str:
             if not record:
                 continue
             columns = []
-            threshold = results[strategy.name].break_even or BREAK_EVEN_HIT_RATE
             for day in days:
                 if day not in record:
                     columns.append('<td class="num meta">—</td>')
                     continue
-                won, count = record[day]
+                won, count, pnl = record[day]
                 rate = won / count
-                weak = "" if rate >= threshold else " meta"
+                # Dimmed when the day lost money, which is the question the threshold was
+                # only ever estimating.
+                weak = "" if pnl > 0 else " meta"
                 columns.append(
                     f'<td class="num{weak}">{rate:.0%} <span class="meta">({count})</span></td>'
                 )
@@ -464,9 +472,8 @@ def _venue_tabs(panels_by_venue, results_by_symbol) -> str:
             f'<section class="wide"><h2>How it is holding up</h2>'
             f'<p class="meta">Hit Rate by the day a Round settled, with the number of Paper'
             f" Trades behind it. A lifetime average stays healthy for a long time after an"
-            f" edge has closed; a row of recent days does not. A day is dimmed when it sits"
-            f" below the break-even its own Strategy's Fills imply, which moves with the"
-            f" price those Fills were made at.</p>"
+            f" edge has closed; a row of recent days does not. A day is dimmed when its"
+            f" Fills lost money, at the prices those Fills were actually made at.</p>"
             f"{_periods_section(results_by_symbol, sources.symbols_of(venue))}</section></div>"
         )
         rules.append(
