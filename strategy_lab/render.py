@@ -22,6 +22,8 @@ DISPLAY_ZONE = timezone(timedelta(hours=DISPLAY_OFFSET_HOURS))
 # Rounds settle every 900 seconds. Anything wider than a couple of those is an absence.
 GAP_SECONDS = 2 * 900
 
+# Only the fallback, for a Strategy that took no trade and so has no Fills to read a
+# threshold from. Everywhere a Result exists, its own break_even is the honest one.
 BREAK_EVEN_HIT_RATE = 1 / 1.314422
 
 # Enough to check the scoring by eye without turning the page into a data dump.
@@ -211,8 +213,9 @@ def _table(symbol: str, results, rebuilt: int, scoreable: int) -> str:
         note = ""
         if result.ruined_at is not None:
             note = "ruined"
-        elif result.hit_rate is not None and result.hit_rate >= BREAK_EVEN_HIT_RATE:
-            note = "above break-even"
+        elif (result.hit_rate is not None and result.break_even is not None
+              and result.hit_rate >= result.break_even):
+            note = f"above break-even ({result.break_even:.1%})"
         rows.append(
             f'<tr><td><span class="dot" style="background:{COLOURS[strategy.name]}"></span>'
             f"{html.escape(strategy.name)}</td>"
@@ -365,13 +368,14 @@ def _periods_section(results_by_symbol, symbols=None) -> str:
             if not record:
                 continue
             columns = []
+            threshold = results[strategy.name].break_even or BREAK_EVEN_HIT_RATE
             for day in days:
                 if day not in record:
                     columns.append('<td class="num meta">—</td>')
                     continue
                 won, count = record[day]
                 rate = won / count
-                weak = "" if rate >= BREAK_EVEN_HIT_RATE else " meta"
+                weak = "" if rate >= threshold else " meta"
                 columns.append(
                     f'<td class="num{weak}">{rate:.0%} <span class="meta">({count})</span></td>'
                 )
@@ -458,8 +462,9 @@ def _venue_tabs(panels_by_venue, results_by_symbol) -> str:
             f'<section class="wide"><h2>How it is holding up</h2>'
             f'<p class="meta">Hit Rate by the day a Round settled, with the number of Paper'
             f" Trades behind it. A lifetime average stays healthy for a long time after an"
-            f" edge has closed; a row of recent days does not. Days below the"
-            f" {BREAK_EVEN_HIT_RATE:.1%} break-even are dimmed.</p>"
+            f" edge has closed; a row of recent days does not. A day is dimmed when it sits"
+            f" below the break-even its own Strategy's Fills imply, which moves with the"
+            f" price those Fills were made at.</p>"
             f"{_periods_section(results_by_symbol, sources.symbols_of(venue))}</section></div>"
         )
         rules.append(

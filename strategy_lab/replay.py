@@ -138,6 +138,20 @@ class Result:
         return sum(1 for trade in self.trades if trade.priced_by == "chain")
 
     @property
+    def break_even(self) -> Optional[float]:
+        """The Hit Rate these Fills must beat, from the shares they actually bought.
+
+        Not a constant. A win returns the shares and a loss costs the stake whole, so the
+        threshold moves with the price paid: 1.314422 shares per USDC needs 76.1%, and
+        1.050199 needs 95.2%. Held as one number it silently assumes every Fill was made
+        against an untouched pool, which is the best price there is.
+        """
+        if not self.trades:
+            return None
+        mean = sum(trade.shares for trade in self.trades) / len(self.trades) / SCALE
+        return 1 / mean if mean > 0 else None
+
+    @property
     def hit_rate(self) -> Optional[float]:
         """The share of Paper Trades that picked the winning Side, or None if none were
         taken. Never a silent zero: no trades and no wins are different facts."""
@@ -385,12 +399,18 @@ def load_rounds(
         )
 
     quotes_by_round = defaultdict(lambda: defaultdict(list))
+    # The dashboard opens the recordings read-only and so cannot create this table; a
+    # database written before the Collector began asking the contract simply has no
+    # quotes, and every Fill falls back to the local rule and says so.
+    has_quotes = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chain_quotes'"
+    ).fetchone() is not None
     for observation in conn.execute(
         "SELECT r.ending, q.side, q.ts, q.shares, q.fees FROM rounds r JOIN chain_quotes q "
         "ON q.symbol = r.symbol AND q.round_ending = r.ending "
         + where + "ORDER BY r.ending, q.ts",
         (symbol,),
-    ):
+    ) if has_quotes else ():
         quotes_by_round[observation["ending"]][observation["side"]].append(
             (observation["ts"], (observation["shares"], observation["fees"]))
         )

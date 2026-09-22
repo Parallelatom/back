@@ -128,3 +128,58 @@ class TestAgainstTheChain:
             assert quoted.shares > 0 and quoted.fees >= 0
             return
         pytest.skip("no open Round on either Symbol right now")
+
+
+class TestTheBreakEvenLineFollowsThePrice:
+    """A threshold held as a constant assumes every Fill met an untouched pool."""
+
+    def test_no_trades_has_no_break_even_rather_than_a_default(self, ingest):
+        results = replay(ingest.conn, symbol=BTC, strategies=[ALWAYS_UP])
+        assert results["Always Up"].break_even is None
+
+    def test_the_opening_price_implies_the_familiar_line(self, ingest):
+        a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
+        result = replay(ingest.conn, symbol=BTC, strategies=[ALWAYS_UP])["Always Up"]
+        assert result.break_even == pytest.approx(1 / 1.314422, abs=1e-6)
+
+    def test_a_worse_fill_raises_the_line(self, ingest):
+        a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
+        a_quote(ingest)
+        result = replay(ingest.conn, symbol=BTC, strategies=[ALWAYS_UP])["Always Up"]
+        assert result.break_even == pytest.approx(1 / 1.050199, abs=1e-6)
+        assert result.break_even > 1 / 1.314422
+
+    def test_a_better_fill_lowers_it(self, ingest):
+        a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
+        a_quote(ingest, shares=2_890_330)
+        result = replay(ingest.conn, symbol=BTC, strategies=[ALWAYS_UP])["Always Up"]
+        assert result.break_even == pytest.approx(1 / 2.890330, abs=1e-6)
+
+    def test_the_verdict_quotes_the_line_it_judged_against(self, ingest):
+        from strategy_lab.render import _table
+        from strategy_lab.replay import ALL_STRATEGIES
+        a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
+        a_quote(ingest, shares=2_890_330)
+        results = replay(ingest.conn, symbol=BTC, strategies=ALL_STRATEGIES)
+        assert "above break-even (34.6%)" in _table(BTC, results, 0, 1)
+
+
+class TestAnUnupgradedDatabase:
+    """The dashboard mounts the recordings read-only and cannot create a table."""
+
+    def test_scoring_works_with_no_chain_quotes_table_at_all(self, ingest):
+        a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
+        ingest.conn.execute("DROP TABLE chain_quotes")
+        ingest.conn.commit()
+
+        result = replay(ingest.conn, symbol=BTC, strategies=[ALWAYS_UP])["Always Up"]
+        assert len(result.trades) == 1
+        assert result.trades[0].priced_by == "model"
+
+    def test_the_page_renders_without_the_table(self, ingest):
+        from strategy_lab.render import render_page
+        a_round(ingest, symbol=BTC, ending=ENDING, close=101.0)
+        ingest.conn.execute("DROP TABLE chain_quotes")
+        ingest.conn.commit()
+
+        assert "<!doctype html>" in render_page(ingest.conn)

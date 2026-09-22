@@ -109,7 +109,7 @@ class TestThePage:
         many, page = self._statements_for(ingest, 40)
         assert "40 Rounds recorded" in page
         assert len(many) == len(few)
-        assert len(few) <= 6 * len(sources.ALL_SYMBOLS)
+        assert len(few) <= 7 * len(sources.ALL_SYMBOLS)
 
     def test_it_names_every_strategy_for_both_symbols(self, ingest):
         a_round(ingest, symbol=BTC)

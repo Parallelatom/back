@@ -42,8 +42,9 @@ def render(conn, strategies=None) -> str:
             note = ""
             if result.ruined_at is not None:
                 note = f"ruined at Round {result.ruined_at}"
-            elif result.hit_rate is not None and result.hit_rate >= BREAK_EVEN_HIT_RATE:
-                note = "above break-even"
+            elif (result.hit_rate is not None and result.break_even is not None
+                  and result.hit_rate >= result.break_even):
+                note = f"above break-even ({result.break_even:.1%})"
             lines.append(
                 f"  {strategy.name:<16}{rate:>10}{len(result.trades):>9}"
                 f"{result.bankroll:>10.2f}   {note}"
@@ -56,9 +57,9 @@ def render(conn, strategies=None) -> str:
                 f" Strategy that backs the favourite."
             )
     lines.append(
-        f"\nStake {1.0:.2f} per Round from {STARTING_BANKROLL:.2f}. A win returns about "
-        f"+0.31 and a loss costs 1.00,\nso break-even needs a Hit Rate of "
-        f"{BREAK_EVEN_HIT_RATE:.1%}. Hit Rate is the finding; Bankroll is indicative."
+        f"\nStake {1.0:.2f} per Round from {STARTING_BANKROLL:.2f}. A win returns the shares"
+        " bought and a loss costs 1.00,\nso break-even moves with the price each Fill was"
+        " made at and is shown per Strategy.\nHit Rate is the finding; Bankroll is indicative."
     )
     return "\n".join(lines)
 
