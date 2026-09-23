@@ -257,7 +257,10 @@ def test_no_final_receipt_never_debits_and_wrong_wallet_remains_pending(rig):
 def test_slippage_acknowledgement_required_before_api(rig):
     rig.profile["accept_unprotected_slippage"] = False
     reason = Executor(rig.settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
-    assert reason.startswith("quote unavailable") and not rig.posts
+    # Naming the check that failed is the point: nine causes otherwise read alike.
+    assert reason == ("quote refused: Accounts mint has no verified minimum output;"
+                      " acknowledge in config")
+    assert not rig.posts
 
 
 def test_live_trade_window_can_open_at_nine_minutes_without_changing_paper(rig):
@@ -840,3 +843,44 @@ class TestAdoptingAClaimMadeByHand:
 
         with pytest.raises(ValueError):
             rig.broker.attach_claim(identity, MANUAL_HASH)
+
+
+class TestSayingWhyAQuoteWasRefused:
+    """Nine different checks refuse a live quote. Reporting only the exception type makes
+    a wallet short of gas look exactly like one holding the wrong shares."""
+
+    def _reason(self, rig, monkeypatch, message):
+        from strategy_lab.execution.errors import QuoteRefused
+
+        def refuse(*a, **k):
+            raise QuoteRefused(message)
+
+        monkeypatch.setattr(rig.broker, "quote", refuse)
+        engine = Executor(rig.settings, rig.ledger, rig.broker)
+        return engine.enter(rig.snapshot, NOW)
+
+    def test_the_failing_check_is_named(self, rig, monkeypatch):
+        reason = self._reason(rig, monkeypatch, "fund claim gas before buying")
+        assert reason == "quote refused: fund claim gas before buying"
+
+    def test_anything_else_still_reports_only_its_type(self, rig, monkeypatch):
+        def explode(*a, **k):
+            raise requests.Timeout("sensitive credential")
+
+        monkeypatch.setattr(rig.broker, "quote", explode)
+        engine = Executor(rig.settings, rig.ledger, rig.broker)
+        reason = engine.enter(rig.snapshot, NOW)
+
+        assert reason == "quote unavailable (Timeout)"
+        assert "sensitive" not in reason
+
+    def test_the_log_translates_the_common_ones(self):
+        from strategy_lab.execution.logging import explain
+
+        raw = "quote refused: fund claim gas before buying"
+        assert explain(raw, None) != raw
+        assert "ETH" in explain(raw, None)
+
+    def test_a_refusal_reserves_nothing(self, rig, monkeypatch):
+        self._reason(rig, monkeypatch, "insufficient USDC or wrong stake")
+        assert rig.ledger.positions() == []

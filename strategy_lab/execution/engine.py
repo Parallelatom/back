@@ -9,7 +9,7 @@ import time
 
 from .paper import Quote, Receipt
 from .signals import decide
-from .errors import NotSubmitted, BuyUncertain
+from .errors import QuoteRefused, NotSubmitted, BuyUncertain
 
 
 class Executor:
@@ -37,6 +37,10 @@ class Executor:
             return "already recorded"
         try:
             quote = self.broker.quote(snapshot, entry.side, self.settings.stake)
+        except QuoteRefused as exc:
+            # Fixed local text naming the check that failed, and safe to repeat. Nine
+            # different causes otherwise read as one unexplained line in the log.
+            return f"quote refused: {exc}"
         except Exception as exc:
             return f"quote unavailable ({type(exc).__name__})"
         if self.settings.mode == "live":

@@ -16,7 +16,7 @@ from eth_utils import keccak, to_checksum_address
 from .accounts import (CLAIMANT, ENDPOINT, USDC, ZERO, address, claim_transaction,
                        hex_value, inspect_receipt, mint_hash, mint_payload)
 from .config import Settings
-from .errors import SetupError, NotSubmitted, BuyUncertain
+from .errors import QuoteRefused, SetupError, NotSubmitted, BuyUncertain
 from .paper import Quote, Receipt
 
 
@@ -242,28 +242,28 @@ class LiveBroker:
 
     def quote(self, snapshot, side, amount):
         if self.entry_block():
-            raise ValueError("live entries halted")
+            raise QuoteRefused("live entries halted")
         if amount != 1_000_000 or self.balance(USDC) < amount:
-            raise ValueError("insufficient USDC or wrong stake")
+            raise QuoteRefused("insufficient USDC or wrong stake")
         if int(self.rpc.call("eth_getBalance", [self.wallet, "latest"]), 16) < self.gas_cap:
-            raise ValueError("fund claim gas before buying")
+            raise QuoteRefused("fund claim gas before buying")
         if self.profile.get("accept_unprotected_slippage") is not True:
-            raise ValueError("Accounts mint has no verified minimum output; acknowledge in config")
+            raise QuoteRefused("Accounts mint has no verified minimum output; acknowledge in config")
         pool = address(snapshot.pool)
         if self.rpc.view(pool, "timeEnding()")[0] != snapshot.record.ending:
-            raise ValueError("pool expiry does not match Round")
+            raise QuoteRefused("pool expiry does not match Round")
         if snapshot.record.ending - time.time() < 75:
-            raise ValueError("too near buy cutoff")
+            raise QuoteRefused("too near buy cutoff")
         if self.rpc.view(pool, "isDppm()", outputs=("bool",))[0]:
-            raise ValueError("DPPM pools are not supported by this binary executor")
+            raise QuoteRefused("DPPM pools are not supported by this binary executor")
         outcomes = self.rpc.view(pool, "outcomeList()", outputs=("bytes8[]",))[0]
         expected = {hex_value(snapshot.outcome_up, 8), hex_value(snapshot.outcome_down, 8)}
         if len(outcomes) != 2 or {"0x" + o.hex() for o in outcomes} != expected or len(expected) != 2:
-            raise ValueError("pool outcomes do not match Round")
+            raise QuoteRefused("pool outcomes do not match Round")
         outcome = snapshot.outcome_up if side == "UP" else snapshot.outcome_down
         share = self.mapping(pool, outcome)
         if self.balance(share):
-            raise ValueError("pool already has shares; use a dedicated wallet")
+            raise QuoteRefused("pool already has shares; use a dedicated wallet")
         shares = self.rpc.view(pool, "quoteC0E17FC7(bytes8,uint256)", ("bytes8", "uint256"),
                      (bytes.fromhex(outcome[2:]), amount), ("uint256", "uint256", "uint256"))[0]
         return Quote(shares, int(time.time()))

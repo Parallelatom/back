@@ -69,6 +69,18 @@ def explain(reason, market):
         "BUY_PENDING": "ส่งซื้อแล้ว/รอตรวจสอบผล — ยังไม่ยืนยันว่าได้ shares",
         "open-position limit": "มีออร์เดอร์ค้าง — รอยืนยันซื้อ/ผลรอบ/claim ก่อนซื้อเพิ่ม",
         "waiting for buy confirmation or claim": "รอยืนยันซื้อหรือเคลมก่อน — ยังไม่เปิดออร์เดอร์ซ้อน",
+        "quote refused: live entries halted": "หยุดซื้อชั่วคราว — มี halt flag ค้างอยู่",
+        "quote refused: insufficient USDC or wrong stake":
+            "USDC ในกระเป๋าไม่พอสำหรับไม้ละ 1 USDC",
+        "quote refused: fund claim gas before buying":
+            "ETH ไม่พอจ่าย gas ตอนเคลม — เติมก่อนถึงจะซื้อได้",
+        "quote refused: Accounts mint has no verified minimum output; acknowledge in config":
+            "ต้องตั้ง accept_unprotected_slippage เป็น true ใน config ก่อน",
+        "quote refused: too near buy cutoff": "ใกล้เวลาปิดซื้อเกินไป (ต้องเหลือเกิน 75s)",
+        "quote refused: pool already has shares; use a dedicated wallet":
+            "กระเป๋านี้ถือ shares ของ pool นี้อยู่แล้ว — ต้องใช้กระเป๋าเฉพาะ",
+        "quote refused: pool expiry does not match Round": "เวลาปิดของ pool ไม่ตรงกับรอบ",
+        "quote refused: pool outcomes do not match Round": "outcome ของ pool ไม่ตรงกับรอบ",
     }.get(reason, reason)
 
 
