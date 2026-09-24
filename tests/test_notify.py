@@ -5,6 +5,7 @@ something, and a loss limit fires when money was lost, so the commands that undo
 have to put the reason in front of a person before they will act.
 """
 import json
+import pathlib
 import sqlite3
 import time
 
@@ -141,7 +142,7 @@ class TestStatus:
         ledger = a_ledger(tmp_path, positions=[a_position("c" * 64, "OPEN", payout=0)])
         control = Control({"BTC": ledger}, recordings(tmp_path))
 
-        assert "ended" in control.handle("/status")
+        assert "ago" in control.handle("/status")
 
 
 class TestRefusingTheUnknown:
@@ -293,3 +294,45 @@ class TestReadingTheLogOnAPhone:
     def test_an_empty_log_says_so(self):
         from strategy_lab.execution.notify import format_log
         assert format_log("") == "log is empty"
+
+
+
+class TestFittingOnAPhone:
+    """Every answer has to be readable in a narrow column without horizontal scrolling."""
+
+    def _wide(self, text):
+        return max(len(line) for line in text.splitlines())
+
+    def test_status_stays_narrow(self, tmp_path):
+        control = Control({"BTC": a_ledger(tmp_path), "XYZCL": a_ledger(tmp_path, "x.db")},
+                          recordings(tmp_path, [("BTC", 2), ("XYZCL", 3)]))
+        assert self._wide(control.handle("/status")) <= 48
+
+    def test_fills_stays_narrow_and_leads_with_the_common_case(self, tmp_path):
+        ledger = a_ledger(tmp_path, positions=[
+            a_position("a" * 64, "REDEEMED"),
+            a_position("b" * 64, "REDEEMED"),
+            a_position("c" * 64, "REDEEMED", shares=1_050_199, payout=1_050_199),
+        ])
+        control = Control({"BTC": ledger}, recordings(tmp_path))
+        answer = control.handle("/fills BTC")
+        rows = [line for line in answer.splitlines() if "needs" in line]
+
+        assert self._wide(answer) <= 48
+        assert "1.314422" in rows[0]          # the usual price first
+        assert rows[-1].endswith("⚠️")        # the exception marked, last
+        assert "break-even" in answer
+
+    def test_fills_summarises_the_share_below_quote(self, tmp_path):
+        ledger = a_ledger(tmp_path, positions=[
+            a_position("a" * 64, "REDEEMED"),
+            a_position("c" * 64, "REDEEMED", shares=1_050_199, payout=1_050_199),
+        ])
+        control = Control({"BTC": ledger}, recordings(tmp_path))
+        assert "below quote: 1 (50.0%)" in control.handle("/fills BTC")
+
+    def test_nothing_is_sent_as_markdown(self):
+        """Machine-made text cannot be trusted to balance markup, and Telegram drops the
+        whole message when it does not."""
+        source = pathlib.Path("strategy_lab/execution/notify.py").read_text()
+        assert '"parse_mode"' not in source

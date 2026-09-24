@@ -84,20 +84,23 @@ def status(symbol: str, ledger: str, recordings: str) -> str:
     finally:
         conn.close()
     age = feed_age(recordings, symbol)
-    lines = [f"*{symbol}*"]
-    if age is None:
-        lines.append("  feed: unknown")
-    else:
-        lines.append(f"  feed: {age}s old" + ("  ⚠️ STALE" if age > FEED_SILENCE_SECONDS else ""))
-    lines.append("  halt: " + (f"⛔ {flags['halt']}" if "halt" in flags else "none"))
+    halted = "halt" in flags
+    lines = [f"{'⛔' if halted else '🟢'} {symbol}"]
+    feed = "unknown" if age is None else f"{age}s"
+    lines.append(f"feed {feed}" + ("  ⚠️ STALE" if age is not None
+                                   and age > FEED_SILENCE_SECONDS else ""))
+    if halted:
+        lines.append(f"stopped: {flags['halt'][:70]}")
     if session:
-        lines.append(f"  session: {session['wins']}/{session['settled']} won"
-                     f" | net {session['net']:+.4f} | loss counted {session['gross_loss']:.2f}/2.00")
-    lines.append(f"  open positions: {len(active)}")
+        lines.append(f"session {session['wins']}/{session['settled']} won"
+                     f"  ·  net {session['net']:+.3f}")
+        lines.append(f"loss {session['gross_loss']:.2f} / 2.00")
+    if not active:
+        lines.append("open: none")
     for position in active:
         left = position["ending"] - int(time.time())
-        when = f"ends in {left}s" if left > 0 else f"ended {-left}s ago"
-        lines.append(f"    {position['id'][:12]} {position['side']} {position['state']} ({when})")
+        when = f"{left}s left" if left > 0 else f"{-left // 60}m ago"
+        lines.append(f"open: {position['side']} {position['state']} ({when})")
     return "\n".join(lines)
 
 
@@ -111,15 +114,23 @@ def fills(symbol: str, ledger: str) -> str:
                              " GROUP BY shares ORDER BY shares").fetchall()
     finally:
         conn.close()
-    lines = [f"*{symbol} fills*"]
-    for row in short:
-        got, quoted = row["shares"] / 1e6, row["quoted_shares"] / 1e6
-        lines.append(f"  ⚠️ {row['id'][:12]} quoted {quoted:.6f} got {got:.6f}"
-                     f" ({(got / quoted - 1) * 100:+.1f}%) needs {100 / got:.1f}%")
-    for row in every:
+    if not every:
+        return f"{symbol}: no confirmed fills yet"
+    total = sum(row["n"] for row in every)
+    spent = sum(row["shares"] * row["n"] for row in every)
+    mean = spent / total / 1e6
+    lines = [f"{symbol} · {total} fills", ""]
+    # Commonest first: what a Fill usually buys is the fact, and the rare bad one is the
+    # exception worth marking rather than the headline.
+    for row in sorted(every, key=lambda r: -r["n"]):
         shares = row["shares"] / 1e6
-        lines.append(f"  {shares:.6f} x{row['n']}  needs {100 / shares:.1f}%")
-    return "\n".join(lines) if len(lines) > 1 else f"*{symbol}*: no confirmed fills yet"
+        flag = "  ⚠️" if any(s["shares"] == row["shares"] for s in short) else ""
+        lines.append(f"{shares:.6f}  x{row['n']:<4} needs {100 / shares:.1f}%{flag}")
+    lines.append("")
+    if short:
+        lines.append(f"below quote: {len(short)} ({len(short) / total:.1%})")
+    lines.append(f"mean {mean:.4f} → break-even {100 / mean:.1f}%")
+    return "\n".join(lines)
 
 
 def clear_halt(symbol: str, ledger: str) -> str:
@@ -236,7 +247,10 @@ class Telegram:
 
     def send(self, text: str, buttons=None):
         # Telegram rejects anything over 4096 characters; a truncated answer beats none.
-        params = {"chat_id": self.chat_id, "text": text[:4000], "parse_mode": "Markdown",
+        # No parse_mode. A ledger error like BUY_HASH_UNKNOWN_TO_CHAIN carries four
+        # underscores, and Telegram rejects the whole message when markup does not
+        # balance — the reply simply never arrives.
+        params = {"chat_id": self.chat_id, "text": text[:4000],
                   "disable_web_page_preview": "true"}
         if buttons:
             params["reply_markup"] = json.dumps({"inline_keyboard": buttons})
