@@ -15,3 +15,4 @@ execution-secrets.env
 .claude/
 .scratch/
 skills-lock.json
+telegram-secrets.env
