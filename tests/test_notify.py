@@ -336,3 +336,46 @@ class TestFittingOnAPhone:
         whole message when it does not."""
         source = pathlib.Path("strategy_lab/execution/notify.py").read_text()
         assert '"parse_mode"' not in source
+
+
+class TestShowingWhatTheWalletHolds:
+    """The ledger total is accounting. What decides whether a buy can happen is the
+    balance on chain, and both of its limits have stopped this bot already."""
+
+    def _status(self, tmp_path, monkeypatch, usdc, eth):
+        from strategy_lab.execution import notify
+        monkeypatch.setattr(notify, "wallet_funds", lambda address: (usdc, eth))
+        control = Control({"BTC": a_ledger(tmp_path)}, recordings(tmp_path),
+                          addresses={"BTC": "0x" + "ab" * 20})
+        return control.handle("/status")
+
+    def test_it_shows_both_balances(self, tmp_path, monkeypatch):
+        answer = self._status(tmp_path, monkeypatch, 10_110_000, 2 * 10**16)
+        assert "10.11 USDC" in answer and "ETH" in answer
+
+    def test_a_balance_below_a_whole_ticket_is_called_out(self, tmp_path, monkeypatch):
+        assert "no ticket" in self._status(tmp_path, monkeypatch, 500_000, 2 * 10**16)
+
+    def test_gas_below_the_floor_is_called_out(self, tmp_path, monkeypatch):
+        assert "no claim gas" in self._status(tmp_path, monkeypatch, 10_000_000, 10**13)
+
+    def test_gas_that_clears_the_floor_but_buys_few_claims_still_warns(self, tmp_path, monkeypatch):
+        """0.00028 ETH passed every guard and was one claim from stopping."""
+        answer = self._status(tmp_path, monkeypatch, 10_000_000, 280_000_000_000_000)
+        assert "gas low" in answer
+
+    def test_a_healthy_wallet_says_nothing_extra(self, tmp_path, monkeypatch):
+        answer = self._status(tmp_path, monkeypatch, 10_000_000, 2 * 10**16)
+        assert "⚠️" not in answer
+
+    def test_an_unreachable_chain_does_not_break_status(self, tmp_path, monkeypatch):
+        from strategy_lab.execution import notify
+        monkeypatch.setattr(notify, "wallet_funds", lambda address: None)
+        control = Control({"BTC": a_ledger(tmp_path)}, recordings(tmp_path),
+                          addresses={"BTC": "0x" + "ab" * 20})
+        answer = control.handle("/status")
+        assert "unreachable" in answer and "BTC" in answer
+
+    def test_without_an_address_nothing_is_claimed(self, tmp_path):
+        control = Control({"BTC": a_ledger(tmp_path)}, recordings(tmp_path))
+        assert "wallet" not in control.handle("/status")

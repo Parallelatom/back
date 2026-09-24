@@ -66,6 +66,44 @@ def _session(conn):
     }
 
 
+# Arbitrum One. The monitor reads balances and nothing else; it holds no key and signs
+# nothing, so a public address from the configuration is all it ever needs.
+RPC_URL = "https://arb1.arbitrum.io/rpc"
+USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+BALANCE_OF = "0x70a08231"
+# What quote() insists on before it will buy: a whole ticket, and gas to claim with.
+MIN_USDC_MICRO = 1_000_000
+MIN_ETH_WEI = 100_000_000_000_000
+# Claims have cost between 0.00015 and 0.00031 ETH in practice, so a balance that clears
+# the floor can still be one claim from stopping. Say so while there is time to top up.
+LOW_ETH_WEI = 1_000_000_000_000_000
+LOW_USDC_MICRO = 3_000_000
+
+
+def _rpc(method: str, params):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
+                       "params": params}).encode()
+    request = urllib.request.Request(RPC_URL, data=body, headers={
+        "content-type": "application/json", "User-Agent": "strategy-lab-monitor"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response).get("result")
+
+
+def wallet_funds(address: str):
+    """USDC and ETH actually held, or None when the chain cannot be reached.
+
+    The ledger's own figure is an accounting total and says so; this is the balance the
+    runner's own guards read before every buy.
+    """
+    try:
+        usdc = _rpc("eth_call", [{"to": USDC,
+                                  "data": BALANCE_OF + address[2:].rjust(64, "0")}, "latest"])
+        eth = _rpc("eth_getBalance", [address, "latest"])
+        return int(usdc, 16), int(eth, 16)
+    except (urllib.error.URLError, OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def feed_age(recordings: str, symbol: str):
     try:
         conn = _open(recordings)
@@ -77,7 +115,7 @@ def feed_age(recordings: str, symbol: str):
         return None
 
 
-def status(symbol: str, ledger: str, recordings: str) -> str:
+def status(symbol: str, ledger: str, recordings: str, address=None) -> str:
     conn = _open(ledger)
     try:
         flags, active, session = _flags(conn), _active(conn), _session(conn)
@@ -95,6 +133,23 @@ def status(symbol: str, ledger: str, recordings: str) -> str:
         lines.append(f"session {session['wins']}/{session['settled']} won"
                      f"  ·  net {session['net']:+.3f}")
         lines.append(f"loss {session['gross_loss']:.2f} / 2.00")
+    if address:
+        funds = wallet_funds(address)
+        if funds is None:
+            lines.append("wallet: unreachable")
+        else:
+            usdc, eth = funds
+            short = []
+            if usdc < MIN_USDC_MICRO:
+                short.append("no ticket")
+            elif usdc < LOW_USDC_MICRO:
+                short.append("USDC low")
+            if eth < MIN_ETH_WEI:
+                short.append("no claim gas")
+            elif eth < LOW_ETH_WEI:
+                short.append(f"gas low (~{int(eth / 310_000_000_000_000)} claims)")
+            warn = "  ⚠️ " + ", ".join(short) if short else ""
+            lines.append(f"wallet {usdc / 1e6:.2f} USDC · {eth / 1e18:.5f} ETH{warn}")
     if not active:
         lines.append("open: none")
     for position in active:
@@ -267,8 +322,9 @@ class Telegram:
 class Control:
     """Commands over the live ledgers. Destructive ones ask twice and show their reasons."""
 
-    def __init__(self, markets, recordings: str, logs=None):
+    def __init__(self, markets, recordings: str, logs=None, addresses=None):
         self.markets, self.recordings, self.logs = markets, recordings, logs or {}
+        self.addresses = addresses or {}
 
     def _symbol(self, argument):
         if not argument:
@@ -289,8 +345,9 @@ class Control:
         if command in ("start", "help"):
             return self.help()
         if command == "status":
-            return "\n\n".join(status(s, self.markets[s], self.recordings)
-                               for s in sorted(self.markets))
+            return "\n\n".join(
+                status(s, self.markets[s], self.recordings, self.addresses.get(s))
+                for s in sorted(self.markets))
         # Resolve the command before the market, or an unknown command answers a question
         # nobody asked — "name a market" instead of what the commands are.
         if command not in ("fills", "log", "clearhalt", "resetloss"):
@@ -391,6 +448,8 @@ def main():
     parser.add_argument("--recordings", default="data/lab.db")
     parser.add_argument("--market", action="append", default=[], metavar="SYMBOL=LEDGER[:LOG]",
                         help="repeat per market, e.g. BTC=data/live-BTC.db:data/BTC-continuous.log")
+    parser.add_argument("--config", default="execution-accounts.json",
+                        help="public configuration, read only for each wallet's address")
     parser.add_argument("--alert-seconds", type=float, default=60)
     args = parser.parse_args()
 
@@ -411,7 +470,17 @@ def main():
     if not markets:
         raise SystemExit("give at least one --market")
 
-    telegram, control = Telegram(token, chat_id), Control(markets, args.recordings, logs)
+    # Public addresses only. Nothing here reads a key or an Authorization value.
+    addresses = {}
+    try:
+        wallets = json.loads(Path(args.config).read_text()).get("wallets") or {}
+        addresses = {symbol: wallets[symbol]["address"] for symbol in markets
+                     if wallets.get(symbol, {}).get("address")}
+    except (OSError, ValueError, KeyError, TypeError):
+        print(f"no wallet addresses from {args.config}; balances will be omitted", flush=True)
+
+    telegram = Telegram(token, chat_id)
+    control = Control(markets, args.recordings, logs, addresses)
     offset, seen, checked = 0, {}, 0.0
     telegram.send("🟢 monitor up", control.menu())
     while True:
