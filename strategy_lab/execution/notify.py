@@ -180,10 +180,17 @@ class Telegram:
         with urllib.request.urlopen(request, timeout=POLL_TIMEOUT + 15) as response:
             return json.load(response)
 
-    def send(self, text: str):
+    def send(self, text: str, buttons=None):
         # Telegram rejects anything over 4096 characters; a truncated answer beats none.
-        self._call("sendMessage", chat_id=self.chat_id, text=text[:4000],
-                   parse_mode="Markdown", disable_web_page_preview="true")
+        params = {"chat_id": self.chat_id, "text": text[:4000], "parse_mode": "Markdown",
+                  "disable_web_page_preview": "true"}
+        if buttons:
+            params["reply_markup"] = json.dumps({"inline_keyboard": buttons})
+        self._call("sendMessage", **params)
+
+    def answer(self, callback_id: str):
+        """Telegram spins on the button until the press is acknowledged."""
+        self._call("answerCallbackQuery", callback_query_id=callback_id)
 
     def updates(self, offset: int):
         return self._call("getUpdates", offset=offset, timeout=POLL_TIMEOUT).get("result", [])
@@ -242,6 +249,38 @@ class Control:
                         f" much again. To do it:\n`/resetloss {symbol} yes`")
             return reset_loss(symbol, self.markets[symbol])
         return self.help()
+
+    def menu(self):
+        """The whole surface as buttons, so nothing has to be remembered or typed."""
+        rows = [[{"text": "📊 status", "callback_data": "status"}]]
+        for symbol in sorted(self.markets):
+            rows.append([
+                {"text": f"{symbol}: fills", "callback_data": f"fills {symbol}"},
+                {"text": f"{symbol}: log", "callback_data": f"log {symbol}"},
+            ])
+        for symbol in sorted(self.markets):
+            rows.append([
+                {"text": f"▶️ resume {symbol}", "callback_data": f"clearhalt {symbol}"},
+                {"text": f"♻️ reset loss {symbol}", "callback_data": f"resetloss {symbol}"},
+            ])
+        return rows
+
+    def buttons_for(self, text: str):
+        """A destructive command answers with its evidence and one button to go on.
+
+        Never offered straight from the menu: the first press shows what happened and the
+        second acts, which is the same two steps the typed form asks for.
+        """
+        parts = (text or "").split()
+        if len(parts) >= 2 and not (len(parts) > 2 and parts[2].lower() == "yes"):
+            command = parts[0].lstrip("/").split("@")[0].lower()
+            symbol = parts[1].upper()
+            if command in ("clearhalt", "resetloss") and symbol in self.markets:
+                label = "resume trading" if command == "clearhalt" else "reset the loss counter"
+                return [[{"text": f"⚠️ yes — {label} on {symbol}",
+                          "callback_data": f"{command} {symbol} yes"}],
+                        [{"text": "✖️ leave it", "callback_data": "status"}]]
+        return self.menu()
 
     def help(self) -> str:
         return ("*commands*\n"
@@ -306,22 +345,30 @@ def main():
 
     telegram, control = Telegram(token, chat_id), Control(markets, args.recordings, logs)
     offset, seen, checked = 0, {}, 0.0
-    telegram.send("🟢 monitor up\n" + control.help())
+    telegram.send("🟢 monitor up", control.menu())
     while True:
         try:
             for update in telegram.updates(offset):
                 offset = update["update_id"] + 1
-                message = update.get("message") or {}
+                press = update.get("callback_query")
+                message = press.get("message", {}) if press else (update.get("message") or {})
                 # One chat may command this. Anything else is read and dropped in silence,
                 # which tells a stranger nothing about whether they found anything.
                 if str((message.get("chat") or {}).get("id")) != chat_id:
                     continue
-                telegram.send(control.handle(message.get("text", "")))
+                if press:
+                    # Acknowledge first: the button spins until this lands, and the work
+                    # behind it can take a moment.
+                    telegram.answer(press["id"])
+                    text = press.get("data", "")
+                else:
+                    text = message.get("text", "")
+                telegram.send(control.handle(text), control.buttons_for(text))
             if time.time() - checked >= args.alert_seconds:
                 checked = time.time()
                 messages, seen = alerts(control, seen)
                 for text in messages:
-                    telegram.send(text)
+                    telegram.send(text, control.menu())
         except (urllib.error.URLError, OSError, ValueError, KeyError):
             # A monitor that dies on a dropped connection is worse than no monitor.
             time.sleep(5)

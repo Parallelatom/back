@@ -189,3 +189,47 @@ class TestReadingTheLog:
 
     def test_a_missing_log_does_not_raise(self, tmp_path):
         assert "cannot read" in tail(str(tmp_path / "nope.log"))
+
+
+class TestButtons:
+    """Everything reachable by tapping, without weakening the two steps a destructive
+    command takes."""
+
+    def a_control(self, tmp_path, **kwargs):
+        return Control({"BTC": a_ledger(tmp_path, **kwargs),
+                        "XYZCL": a_ledger(tmp_path, "x.db")}, recordings(tmp_path))
+
+    def test_the_menu_offers_every_market(self, tmp_path):
+        labels = [b["text"] for row in self.a_control(tmp_path).menu() for b in row]
+        assert any("BTC: fills" in l for l in labels)
+        assert any("XYZCL: fills" in l for l in labels)
+
+    def test_a_button_press_is_the_same_command_as_typing_it(self, tmp_path):
+        control = self.a_control(tmp_path, halt="fill below minimum")
+        presses = [b["callback_data"] for row in control.menu() for b in row]
+
+        assert "clearhalt BTC" in presses
+        # And it routes exactly as the typed form does.
+        assert "/clearhalt BTC yes" in control.handle("clearhalt BTC")
+
+    def test_the_menu_never_offers_a_one_tap_destruction(self, tmp_path):
+        presses = [b["callback_data"] for row in self.a_control(tmp_path).menu() for b in row]
+        assert not any(p.endswith(" yes") for p in presses)
+
+    def test_asking_to_resume_offers_the_confirming_button(self, tmp_path):
+        control = self.a_control(tmp_path, halt="fill below minimum")
+        buttons = control.buttons_for("clearhalt BTC")
+        presses = [b["callback_data"] for row in buttons for b in row]
+
+        assert "clearhalt BTC yes" in presses
+        assert "status" in presses          # and a way out
+
+    def test_the_confirming_press_falls_back_to_the_menu(self, tmp_path):
+        control = self.a_control(tmp_path, halt="fill below minimum")
+        presses = [b["callback_data"] for row in control.buttons_for("clearhalt BTC yes")
+                   for b in row]
+        assert "clearhalt BTC yes" not in presses
+
+    def test_an_unknown_market_gets_the_plain_menu(self, tmp_path):
+        control = self.a_control(tmp_path)
+        assert control.buttons_for("clearhalt DOGE") == control.menu()
