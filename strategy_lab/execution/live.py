@@ -328,7 +328,31 @@ class LiveBroker:
                     error="BUY_ACK_UNKNOWN: skipped Round; funds reserved for chain reconciliation")
                 return None
             self.recover_unknown_buy(position, op)
+        elif op and position["state"] == "BUY_PENDING" and self.hash_never_existed(position, op):
+            # The API answered with a hash for a transaction it never sent. Waiting for it
+            # to mine waits forever, and the Round it was for has already ended, so a late
+            # receipt could not be accepted anyway. Ambiguity is the honest state: it keeps
+            # the stake reserved and frees the entry slot, and the same recovery that
+            # handles a missing acknowledgement then proves on chain whether anything
+            # happened before releasing it.
+            self.ledger.transition(position["id"], "BUY_PENDING", "BUY_UNKNOWN", int(time.time()),
+                error="BUY_HASH_UNKNOWN_TO_CHAIN: skipped Round; funds reserved for chain reconciliation")
+            return None
         return self._receipt(position, "buy")
+
+    def hash_never_existed(self, position, op) -> bool:
+        """Whether the chain has no record of this hash at all, mined or pending.
+
+        Only asked once the Round is over, so a transaction still propagating is never
+        mistaken for one that was never sent, and no more than once a minute.
+        """
+        if time.time() <= position["ending"]:
+            return False
+        now = int(time.time())
+        if now - self.recovery_checks.get("seen:" + position["id"], 0) < 60:
+            return False
+        self.recovery_checks["seen:" + position["id"]] = now
+        return self.rpc.call("eth_getTransactionByHash", [op["tx_hash"]]) is None
 
     def recover_unknown_buy(self, position, op):
         now = int(time.time())

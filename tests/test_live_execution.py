@@ -71,6 +71,10 @@ class FakeRPC:
         if method == "eth_blockNumber": return "0x100"
         if method == "eth_getBlockByNumber": return {"number": "0x100", "timestamp": hex(NOW)}
         if method == "eth_getLogs": return []
+        # A hash with a receipt is certainly known to the chain; anything else never
+        # reached it, which is what the runner asks about a purchase that will not confirm.
+        if method == "eth_getTransactionByHash":
+            return {"hash": params[0]} if params[0] in self.receipts else None
         if method == "eth_chainId": return "0xa4b1"
         if method == "eth_getCode": return "0x" if params[0] not in (USDC, CLAIMANT) else "0x1234"
         if method == "eth_getBalance": return hex(10**17)
@@ -884,3 +888,72 @@ class TestSayingWhyAQuoteWasRefused:
     def test_a_refusal_reserves_nothing(self, rig, monkeypatch):
         self._reason(rig, monkeypatch, "insufficient USDC or wrong stake")
         assert rig.ledger.positions() == []
+
+
+class TestAHashTheChainNeverSaw:
+    """The mint API can answer with a hash for a transaction it never sent.
+
+    Seen live: a BTC buy sat in BUY_PENDING for over an hour while both
+    eth_getTransactionByHash and eth_getTransactionReceipt returned null, holding the
+    entry slot so every later Round passed untraded.
+    """
+
+    def _pending_with_a_phantom_hash(self, rig):
+        engine = Executor(rig.settings, rig.ledger, rig.broker)
+        engine.enter(rig.snapshot, NOW)
+        identity = rig.ledger.positions()[0]["id"]
+        assert rig.ledger.get(identity)["state"] == "BUY_PENDING"
+        # BUY_HASH is recorded but deliberately absent from rig.rpc.receipts.
+        return engine, identity
+
+    def test_it_waits_while_the_round_is_still_running(self, rig):
+        engine, identity = self._pending_with_a_phantom_hash(rig)
+
+        engine.advance(NOW, rig.broker.settlement)
+
+        assert rig.ledger.get(identity)["state"] == "BUY_PENDING"
+
+    def test_once_the_round_is_over_it_becomes_ambiguous(self, rig, monkeypatch):
+        engine, identity = self._pending_with_a_phantom_hash(rig)
+        monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: END + 1)
+
+        engine.advance(END + 1, rig.broker.settlement)
+
+        position = rig.ledger.get(identity)
+        assert position["state"] == "BUY_UNKNOWN"
+        assert "UNKNOWN_TO_CHAIN" in position["error"]
+
+    def test_it_frees_the_entry_slot_while_keeping_the_stake(self, rig, monkeypatch):
+        engine, identity = self._pending_with_a_phantom_hash(rig)
+        monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: END + 1)
+        engine.advance(END + 1, rig.broker.settlement)
+
+        # Ambiguity reserves cash and exposure but does not occupy the slot.
+        assert rig.ledger.entry_active(END + 1) == []
+        assert rig.ledger.summary(rig.settings)["reserved_usd"] == 1
+
+    def test_a_hash_the_chain_does_know_is_left_alone(self, rig, monkeypatch):
+        engine, identity = self._pending_with_a_phantom_hash(rig)
+        rig.rpc.receipts[BUY_HASH] = receipt(rig.broker.wallet, BUY_HASH, "buy")
+        monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: END + 1)
+
+        engine.advance(END + 1, rig.broker.settlement)
+
+        assert rig.ledger.get(identity)["state"] == "OPEN"
+
+    def test_the_chain_is_not_asked_more_than_once_a_minute(self, rig, monkeypatch):
+        engine, identity = self._pending_with_a_phantom_hash(rig)
+        asked = []
+        original = rig.rpc.call
+
+        def counted(method, params):
+            if method == "eth_getTransactionByHash":
+                asked.append(params[0])
+            return original(method, params)
+
+        monkeypatch.setattr(rig.rpc, "call", counted)
+        monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: END + 1)
+        for _ in range(4):
+            engine.advance(END + 1, rig.broker.settlement)
+
+        assert len(asked) == 1
