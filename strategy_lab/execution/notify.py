@@ -261,7 +261,7 @@ class Control:
         for symbol in sorted(self.markets):
             rows.append([
                 {"text": f"▶️ resume {symbol}", "callback_data": f"clearhalt {symbol}"},
-                {"text": f"♻️ reset loss {symbol}", "callback_data": f"resetloss {symbol}"},
+                {"text": f"♻️ {symbol} loss", "callback_data": f"resetloss {symbol}"},
             ])
         return rows
 
@@ -307,7 +307,7 @@ def alerts(control: Control, before: dict) -> tuple:
         was = before.get(symbol, {})
         if halt and was.get("halt") != halt:
             messages.append(f"⛔ *{symbol} stopped trading*\n{halt}\n\n"
-                            f"`/clearhalt {symbol}` to see why and resume")
+                            f"Tap *resume {symbol}* below to see the Fills behind it.")
         if now[symbol]["stale"] and not was.get("stale"):
             messages.append(f"⚠️ *{symbol} feed is stale* ({age}s). Nothing will trade"
                             f" until it returns; this is usually the venue, not us.")
