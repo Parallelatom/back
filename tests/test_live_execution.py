@@ -957,3 +957,62 @@ class TestAHashTheChainNeverSaw:
             engine.advance(END + 1, rig.broker.settlement)
 
         assert len(asked) == 1
+
+
+class TestReleasingThePhantomStake:
+    """Freeing the entry slot is half the job. The stake stays reserved until the chain
+    has shown that nothing was bought, and that proof has to actually run."""
+
+    def _ambiguous_with_a_phantom_hash(self, rig, monkeypatch):
+        engine = Executor(rig.settings, rig.ledger, rig.broker)
+        engine.enter(rig.snapshot, NOW)
+        identity = rig.ledger.positions()[0]["id"]
+        # The chain must have finalised past the Round before anything may be written off.
+        original = rig.rpc.call
+
+        def call(method, params):
+            if method == "eth_getBlockByNumber" and params[0] == "finalized":
+                return {"number": "0x100", "timestamp": hex(END + 400)}
+            return original(method, params)
+
+        monkeypatch.setattr(rig.rpc, "call", call)
+        monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: END + 400)
+        engine.advance(END + 400, rig.broker.settlement)
+        assert rig.ledger.get(identity)["state"] == "BUY_UNKNOWN"
+        return engine, identity
+
+    def test_the_stake_comes_back_once_the_chain_shows_nothing_happened(self, rig, monkeypatch):
+        engine, identity = self._ambiguous_with_a_phantom_hash(rig, monkeypatch)
+        assert rig.ledger.summary(rig.settings)["reserved_usd"] == 1
+
+        # A later pass, past the throttle, with the chain still showing no purchase.
+        monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: END + 500)
+        engine.advance(END + 500, rig.broker.settlement)
+
+        position = rig.ledger.get(identity)
+        assert position["state"] == "EXPIRED"
+        assert "BUY_NOT_OBSERVED" in position["error"]
+        assert rig.ledger.summary(rig.settings)["reserved_usd"] == 0
+
+    def test_a_real_purchase_may_replace_a_phantom_hash(self, rig, monkeypatch):
+        """If the mint turns up under a hash the API never mentioned, it must be
+        attachable — the recorded one stands for nothing."""
+        engine, identity = self._ambiguous_with_a_phantom_hash(rig, monkeypatch)
+        real = "0x" + "5c" * 32
+        rig.rpc.receipts[real] = receipt(rig.broker.wallet, real, "buy")
+
+        rig.broker.attach_buy(identity, real)
+
+        stored = rig.ledger.conn.execute(
+            "SELECT tx_hash FROM live_ops WHERE position_id=? AND operation='buy'",
+            (identity,)).fetchone()[0]
+        assert stored == real
+
+    def test_a_hash_the_chain_does_know_is_never_overwritten(self, rig):
+        engine = Executor(rig.settings, rig.ledger, rig.broker)
+        engine.enter(rig.snapshot, NOW)
+        identity = rig.ledger.positions()[0]["id"]
+        rig.rpc.receipts[BUY_HASH] = receipt(rig.broker.wallet, BUY_HASH, "buy")
+
+        with pytest.raises(ValueError):
+            rig.broker.attach_buy(identity, "0x" + "5c" * 32)

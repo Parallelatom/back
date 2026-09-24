@@ -338,13 +338,23 @@ class LiveBroker:
             self.ledger.transition(position["id"], "BUY_PENDING", "BUY_UNKNOWN", int(time.time()),
                 error="BUY_HASH_UNKNOWN_TO_CHAIN: skipped Round; funds reserved for chain reconciliation")
             return None
+        elif op and position["state"] == "BUY_UNKNOWN":
+            # Ambiguity reached with a hash recorded, which only happens once that hash has
+            # been shown to be one the chain never saw. The recovery still has to run: it
+            # is what proves nothing was bought and gives the stake back. Without this the
+            # slot is freed and the money stays reserved for ever.
+            self.recover_unknown_buy(position, op)
         return self._receipt(position, "buy")
 
-    def hash_never_existed(self, position, op) -> bool:
-        """Whether the chain has no record of this hash at all, mined or pending.
+    def chain_knows(self, tx_hash) -> bool:
+        """Whether the chain has any record of this hash at all, mined or pending."""
+        return self.rpc.call("eth_getTransactionByHash", [tx_hash]) is not None
 
-        Only asked once the Round is over, so a transaction still propagating is never
-        mistaken for one that was never sent, and no more than once a minute.
+    def hash_never_existed(self, position, op) -> bool:
+        """Whether a recorded hash was never sent, asked sparingly.
+
+        Only once the Round is over, so a transaction still propagating is never mistaken
+        for one that was never sent, and no more than once a minute.
         """
         if time.time() <= position["ending"]:
             return False
@@ -352,7 +362,7 @@ class LiveBroker:
         if now - self.recovery_checks.get("seen:" + position["id"], 0) < 60:
             return False
         self.recovery_checks["seen:" + position["id"]] = now
-        return self.rpc.call("eth_getTransactionByHash", [op["tx_hash"]]) is None
+        return not self.chain_knows(op["tx_hash"])
 
     def recover_unknown_buy(self, position, op):
         now = int(time.time())
@@ -507,7 +517,11 @@ class LiveBroker:
         if not position or position["state"] not in ("BUY_PENDING", "BUY_UNKNOWN"):
             raise ValueError("expected a pending buy")
         op = self.op(position, "buy")
-        if not op or op["tx_hash"]:
+        if not op:
+            raise ValueError("only an unknown API acknowledgement can be attached")
+        # A hash the chain never saw is not a record of anything, so the real purchase may
+        # replace it. A hash the chain does know is a record, and must not be overwritten.
+        if op["tx_hash"] and self.chain_knows(op["tx_hash"]):
             raise ValueError("only an unknown API acknowledgement can be attached")
         tx_hash = hex_value(tx_hash, 32)
         if self.ledger.conn.execute("SELECT 1 FROM live_ops WHERE tx_hash=?", (tx_hash,)).fetchone():
@@ -516,8 +530,8 @@ class LiveBroker:
         if receipt is None or not receipt.success:
             raise ValueError("hash must prove a canonical mined matching purchase")
         with self.ledger.conn:
-            self.ledger.conn.execute("UPDATE live_ops SET tx_hash=? WHERE position_id=? AND operation='buy' AND tx_hash IS NULL",
-                                    (tx_hash, identity))
+            self.ledger.conn.execute("UPDATE live_ops SET tx_hash=? WHERE position_id=?"
+                                     " AND operation='buy'", (tx_hash, identity))
 
     def attach_claim(self, identity, tx_hash):
         """Adopt a claim made outside the runner, once the chain proves it.
