@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 import urllib.error
@@ -155,6 +156,59 @@ def reset_loss(symbol: str, ledger: str) -> str:
     return f"✅ {symbol}: risk session reset. Loss counter back to 0; history kept."
 
 
+# A heartbeat line carries the whole market state and repeats every few seconds, so the
+# last one is the state and the ones before it are noise. Events are what is worth reading.
+HEARTBEAT = re.compile(
+    r"^\[(?P<at>[\d:]+)\]\s+(?P<symbol>\w+)\s+\|\s+ราคา\s+(?P<price>[\d,.]+)"
+    r".*?Strike\s+(?P<strike>[\d,.]+).*?Delta\s+(?P<delta>[+\-][\d.]+%)"
+    r".*?เหลือ\s+(?P<left>[\d:]+).*?อายุ\s+(?P<age>\d+)s\s+\|\s+(?P<why>.+)$")
+ORDER = re.compile(
+    r"^\[(?P<at>[\d:]+)\]\s+ORDER\s+(?P<state>\w+)\s+\|\s+\w+\s+(?P<side>UP|DOWN)"
+    r".*?shares=(?P<shares>[\d.]+).*?รับคืนยืนยัน=(?P<back>[\d.]+)")
+REVIEW = re.compile(r"^\[(?P<at>[\d:]+)\]\s+REVIEW\s+\|\s+(?P<note>.+)$")
+
+
+def format_log(text: str, events: int = 6) -> str:
+    """The latest state, then what actually happened — not a wall of repeated heartbeats.
+
+    Falls back to the raw tail if the shape is not recognised, because a log that cannot
+    be parsed is exactly when its literal contents matter most.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "log is empty"
+    state, history = None, []
+    for line in lines:
+        beat = HEARTBEAT.match(line)
+        if beat:
+            state = beat.groupdict()
+            continue
+        order = ORDER.match(line)
+        if order:
+            row = order.groupdict()
+            back = float(row["back"])
+            mark = {"REDEEMED": "✅", "LOST": "❌", "OPEN": "🟡", "EXPIRED": "⚪️"}.get(
+                row["state"], "•")
+            gain = f" +{back - 1:.3f}" if row["state"] == "REDEEMED" and back else ""
+            history.append(f"{row['at']} {mark} {row['state']} {row['side']}{gain}")
+            continue
+        note = REVIEW.match(line)
+        if note:
+            history.append(f"{note['at']} ⚠️ {note['note'][:60]}")
+    if state is None:
+        return "```\n" + "\n".join(lines[-8:]) + "\n```"
+    # Six decimals of a Bitcoin price is four characters of noise on a narrow screen.
+    trim = lambda value: value.rstrip("0").rstrip(".") if "." in value else value
+    out = [f"*{state['symbol']}* · {state['at']}",
+           f"Δ {state['delta']}  ·  {state['left']} left",
+           f"{trim(state['price'])} vs {trim(state['strike'])}",
+           f"feed {state['age']}s",
+           f"_{state['why'].strip()}_"]
+    if history:
+        out += ["", "*recent*"] + history[-events:]
+    return "\n".join(out)
+
+
 def tail(path: str, lines: int = 15) -> str:
     try:
         with open(path, "rb") as handle:
@@ -234,7 +288,7 @@ class Control:
             return fills(symbol, self.markets[symbol])
         if command == "log":
             path = self.logs.get(symbol)
-            return f"```\n{tail(path)}\n```" if path else f"no log configured for {symbol}"
+            return format_log(tail(path, 400)) if path else f"no log configured for {symbol}"
         if command == "clearhalt":
             if not confirmed:
                 return (f"{fills(symbol, self.markets[symbol])}\n\n"

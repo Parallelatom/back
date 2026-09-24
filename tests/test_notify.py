@@ -233,3 +233,63 @@ class TestButtons:
     def test_an_unknown_market_gets_the_plain_menu(self, tmp_path):
         control = self.a_control(tmp_path)
         assert control.buttons_for("clearhalt DOGE") == control.menu()
+
+
+SAMPLE_LOG = """\
+[14:20:12] ORDER OPEN | BTC UP | id=aaa | stake=1.00 USDC | จ่ายยืนยัน=1.000000 | shares=1.314422 | รับคืนยืนยัน=0.000000
+[14:30:40] ORDER REDEEMED | BTC UP | id=aaa | stake=1.00 USDC | จ่ายยืนยัน=1.000000 | shares=1.314422 | รับคืนยืนยัน=1.314422
+[14:31:02] REVIEW | BUY_HASH_UNKNOWN_TO_CHAIN: skipped Round; funds reserved
+[14:33:07] BTC | ราคา 84,515.500000 | Strike 84,377.500000 | Delta +0.1636% | เหลือ 11:53 | feed 14:33:05 อายุ 2s | อยู่นอกช่วงซื้อ
+[14:33:25] BTC | ราคา 84,461.500000 | Strike 84,377.500000 | Delta +0.0996% | เหลือ 11:35 | feed 14:33:24 อายุ 1s | รอ Delta เข้าเงื่อนไข
+"""
+
+
+class TestReadingTheLogOnAPhone:
+    """A heartbeat repeats every few seconds and wraps to six lines on a phone. Only the
+    last one is the state; the events between them are what there is to read."""
+
+    def test_only_the_newest_heartbeat_survives(self):
+        from strategy_lab.execution.notify import format_log
+        answer = format_log(SAMPLE_LOG)
+
+        assert "+0.0996%" in answer          # the latest
+        assert "+0.1636%" not in answer      # and not the one before it
+
+    def test_it_keeps_the_state_worth_seeing(self):
+        from strategy_lab.execution.notify import format_log
+        answer = format_log(SAMPLE_LOG)
+
+        assert "11:35 left" in answer and "feed 1s" in answer
+        assert "รอ Delta เข้าเงื่อนไข" in answer
+
+    def test_trailing_zeros_are_dropped(self):
+        from strategy_lab.execution.notify import format_log
+        answer = format_log(SAMPLE_LOG)
+
+        assert "84,461.5 vs 84,377.5" in answer
+        assert "84,461.500000" not in answer
+
+    def test_events_are_kept_and_marked(self):
+        from strategy_lab.execution.notify import format_log
+        answer = format_log(SAMPLE_LOG)
+
+        assert "REDEEMED UP +0.314" in answer
+        assert "OPEN UP" in answer
+        assert "BUY_HASH_UNKNOWN_TO_CHAIN" in answer
+
+    def test_it_is_short_enough_to_read(self):
+        from strategy_lab.execution.notify import format_log
+        lines = format_log(SAMPLE_LOG).splitlines()
+
+        assert len(lines) <= 14
+        assert max(len(line) for line in lines) <= 70
+
+    def test_an_unrecognised_log_falls_back_to_its_own_words(self):
+        from strategy_lab.execution.notify import format_log
+        answer = format_log("something nobody has seen before\nand another line")
+
+        assert "nobody has seen" in answer
+
+    def test_an_empty_log_says_so(self):
+        from strategy_lab.execution.notify import format_log
+        assert format_log("") == "log is empty"
