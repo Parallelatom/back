@@ -498,3 +498,31 @@ Analyse at most three days per invocation to keep public RPC requests bounded:
 `seconds_to_end` shows when each mint occurred relative to settlement. The live entry
 window is 300 through 75 seconds before settlement; a negative
 `relative_to_window_open_seconds` means the address bought before that window opened.
+
+## Surviving a reboot
+
+Compose brings the Collector, the dashboard and the tunnel back by itself. The live
+runners and the Telegram monitor are started by hand and do not come back, which is worse
+than it sounds: an open position goes unclaimed until somebody notices the runner is gone.
+
+Install them as services once and that stops being true.
+
+```sh
+sudo cp deploy/systemd/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now 9live-runner@XYZCL 9live-runner@BTC 9live-notify
+```
+
+The units assume the checkout is `/home/chai/Backtest`; edit `User=` and
+`WorkingDirectory=` otherwise. Secrets are still sourced by `run-live.sh` and
+`run-notify.sh` rather than handed to systemd, so no key is written into a unit file.
+
+```sh
+systemctl status '9live-*'          # what is running
+journalctl -u 9live-runner@BTC -f   # why one is not
+sudo systemctl stop 9live-runner@BTC
+```
+
+Stopping a runner this way is also the safe way to take one down for maintenance: systemd
+sends SIGTERM and waits, so a claim already in flight finishes rather than being cut off
+halfway through reconciling.

@@ -1,0 +1,31 @@
+# One live runner per Symbol, restarted for as long as the machine is up.
+#
+# A runner that does not come back after a reboot does not merely stop trading: an open
+# position goes unclaimed, and the money sits on chain until somebody notices. That is
+# the reason this exists.
+#
+#   sudo cp deploy/systemd/*.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now 9live-runner@XYZCL 9live-runner@BTC 9live-notify
+#
+# Edit User= and WorkingDirectory= if the checkout is not ~/Backtest owned by chai.
+[Unit]
+Description=9lives live runner (%i)
+# The recordings are read from the Collector's database, which Docker brings up.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=chai
+WorkingDirectory=/home/chai/Backtest
+ExecStart=/bin/bash run-live.sh %i --execute --watch --continuous
+Restart=always
+RestartSec=10
+# Long enough for a claim in flight to finish rather than being cut off mid-reconcile.
+TimeoutStopSec=60
+StandardOutput=append:/home/chai/Backtest/data/%i-continuous.log
+StandardError=append:/home/chai/Backtest/data/%i-continuous.log
+
+[Install]
+WantedBy=multi-user.target

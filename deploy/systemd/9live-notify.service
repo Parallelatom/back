@@ -1,0 +1,19 @@
+# The Telegram monitor. Losing it loses the alerts that say a runner stopped, so it comes
+# back with everything else.
+[Unit]
+Description=9lives Telegram monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=chai
+WorkingDirectory=/home/chai/Backtest
+ExecStart=/bin/bash run-notify.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/chai/Backtest/data/notify.log
+StandardError=append:/home/chai/Backtest/data/notify.log
+
+[Install]
+WantedBy=multi-user.target
