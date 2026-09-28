@@ -115,3 +115,60 @@ class TestTheStateThatBlocksEverything:
     def test_a_claim_not_yet_sent_is_not_a_fault(self):
         answer = waiting_on(position(state="REDEEM_READY"), BUY, NOW, "UP")
         assert "next pass" in answer and "BLOCKS" not in answer
+
+
+class TestWaitingForTheChainToFinalise:
+    """A purchase the runner is still proving is not a purchase needing a person.
+
+    Arbitrum finalises some seventeen minutes behind the head and the write-off waits for
+    five minutes past the Round on top, so an unconfirmed buy sits for around twenty
+    minutes by design. Telling someone to reconcile it by hand invites the one repair
+    that is not needed.
+    """
+
+    def _unconfirmed(self, ending=NOW - 600):
+        return {**position(state="BUY_UNKNOWN", ending=ending), "error": None}
+
+    def test_before_finality_it_says_to_wait(self):
+        # Finality trailing the head by seventeen minutes, as it does.
+        answer = waiting_on(self._unconfirmed(), BUY, NOW, None, finalised_at=NOW - 1000)
+
+        assert "finalis" in answer
+        assert "m more" in answer
+        assert "--attach-buy" not in answer
+
+    def test_after_finality_it_offers_the_manual_route(self):
+        answer = waiting_on(self._unconfirmed(), BUY, NOW, None, finalised_at=NOW)
+
+        assert "--attach-buy" in answer
+
+    def test_without_a_finality_reading_it_does_not_invent_one(self):
+        answer = waiting_on(self._unconfirmed(), BUY, NOW, None, finalised_at=None)
+
+        assert "m more" not in answer
+
+    def test_a_pending_buy_is_still_the_one_that_needs_a_person(self):
+        answer = waiting_on(position(state="BUY_PENDING"), BUY, NOW, None)
+
+        assert "--attach-buy" in answer
+
+
+class TestARoundStillRunning:
+    def test_it_counts_down_rather_than_up(self, tmp_path):
+        import sqlite3
+        path = tmp_path / "live.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """CREATE TABLE positions (id TEXT PRIMARY KEY, symbol TEXT, ending INTEGER,
+                   pool TEXT, outcome TEXT, side TEXT, state TEXT, amount INTEGER);
+               CREATE TABLE live_ops (position_id TEXT, operation TEXT, outcome_up TEXT,
+                   outcome_down TEXT);""")
+        conn.execute("INSERT INTO positions VALUES ('z','XYZCL',?,'0x1','0xa','DOWN',"
+                     "'OPEN',1000000)", (NOW + 332,))
+        conn.commit()
+        conn.close()
+
+        answer = report(str(path), rpc=object(), now=NOW)
+
+        assert "ends in 5m32s" in answer
+        assert "ago" not in answer

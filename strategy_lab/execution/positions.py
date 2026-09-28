@@ -45,7 +45,12 @@ def winner_on_chain(rpc, position, buy):
     return None
 
 
-def waiting_on(position, buy, now, winner):
+# recover_unknown_buy will not write a purchase off until the chain has finalised past
+# this, and Arbitrum finality runs some seventeen minutes behind the head.
+FINALITY_GRACE_SECONDS = 300
+
+
+def waiting_on(position, buy, now, winner, finalised_at=None):
     if position["state"] == "REDEEM_PENDING":
         # This one stops everything: a position that is neither a confirmed open Round
         # nor finished holds the entry slot, so the runner buys nothing until it clears.
@@ -55,7 +60,18 @@ def waiting_on(position, buy, now, winner):
                 " signed rather than signing another")
     if position["state"] == "REDEEM_READY":
         return "claim not yet submitted — the runner will send it on its next pass"
-    if position["state"] in ("BUY_PENDING", "BUY_UNKNOWN"):
+    if position["state"] == "BUY_UNKNOWN":
+        # The runner is already proving this on chain. Saying "reconcile by hand" while
+        # it does invites exactly the manual repair that is not needed.
+        due = position["ending"] + FINALITY_GRACE_SECONDS
+        if finalised_at is not None and finalised_at < due:
+            behind = now - finalised_at
+            return (f"purchase unconfirmed; the runner is proving it on chain and cannot"
+                    f" finish until the chain finalises past the Round — about"
+                    f" {max(0, due - finalised_at + behind) // 60}m more")
+        return ("purchase unconfirmed and the chain has finalised past the Round; if it"
+                " has not cleared within a minute, reconcile with --attach-buy")
+    if position["state"] == "BUY_PENDING":
         return ("purchase not confirmed — reconcile with --attach-buy once the "
                 "transaction is known")
     if position["ending"] > now:
@@ -79,6 +95,13 @@ def report(ledger_path, rpc=None, now=None):
             TERMINAL)]
         if not active:
             return "No open positions. Nothing is blocking a new entry."
+        finalised = None
+        if any(p["state"] == "BUY_UNKNOWN" for p in active):
+            try:
+                block = rpc.call("eth_getBlockByNumber", ["finalized", False])
+                finalised = int(block["timestamp"], 16)
+            except (SetupError, ValueError, KeyError, TypeError):
+                finalised = None
         lines = [f"{len(active)} open position(s):"]
         for position in active:
             buy = conn.execute(
@@ -91,11 +114,13 @@ def report(ledger_path, rpc=None, now=None):
                 except (SetupError, ValueError, KeyError, TypeError):
                     winner = None
             age = now - position["ending"]
+            when = (f"ended {age // 60}m{age % 60:02d}s ago" if age >= 0
+                    else f"ends in {-age // 60}m{-age % 60:02d}s")
             lines.append(
                 f"  {position['id'][:12]} | {position['symbol']} {position['side']} "
                 f"| {position['state']} | stake {position['amount'] / 1e6:.2f} USDC "
-                f"| ended {age // 60}m{age % 60:02d}s ago"
-                f"\n      waiting on: {waiting_on(position, buy, now, winner)}")
+                f"| {when}"
+                f"\n      waiting on: {waiting_on(position, buy, now, winner, finalised)}")
         return "\n".join(lines)
     finally:
         conn.close()
