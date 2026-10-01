@@ -1,5 +1,6 @@
 """No real network: real signing with a throwaway test key, fake Accounts and RPC."""
 import json
+import time
 from unittest.mock import patch
 from dataclasses import replace
 from types import SimpleNamespace
@@ -1016,3 +1017,127 @@ class TestReleasingThePhantomStake:
 
         with pytest.raises(ValueError):
             rig.broker.attach_buy(identity, "0x" + "5c" * 32)
+
+
+SECOND_HASH = "0x" + "2b" * 32
+
+
+class TestResendingAMintThatWasNeverBroadcast:
+    """The venue answers ninelivesMint with a hash for a transaction it never sends —
+    sixty times here, and on its own website too. None ever appeared later.
+
+    One more attempt is defensible on that evidence; duplicating a purchase is not. These
+    pin every case where the resend must not happen.
+    """
+
+    def _rig(self, rig, monkeypatch, retry=True, sent=False, holds=0):
+        rig.broker.profile = {**rig.broker.profile, "retry_unsubmitted_buy": retry}
+        monkeypatch.setattr("strategy_lab.execution.live.time.sleep", lambda s: None)
+        monkeypatch.setattr(rig.broker, "chain_knows", lambda tx: sent)
+        monkeypatch.setattr(rig.broker, "balance", lambda token: holds)
+        posts = []
+        real = rig.broker.__class__.__dict__  # keep the real submit path
+        return posts
+
+    def _resend(self, rig, monkeypatch, **kwargs):
+        posts = self._rig(rig, monkeypatch, **kwargs)
+
+        class Reply:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"data": {"ninelivesMint": SECOND_HASH}}
+
+        def post(url, **kw):
+            posts.append(kw.get("json"))
+            return Reply()
+
+        monkeypatch.setattr("strategy_lab.execution.live.requests.post", post)
+        position = {"id": "p" * 64, "ending": NOW + 600, "pool": POOL, "outcome": UP}
+        payload = {"query": "q", "variables": {"mint": {"amount": "1000000",
+                   "market": POOL, "ms_ts": "1"}}}
+        result = rig.broker.settle_submission(position, payload, BUY_HASH, "0xshare")
+        return result, posts
+
+    def test_a_hash_the_chain_never_saw_is_sent_again(self, rig, monkeypatch):
+        result, posts = self._resend(rig, monkeypatch)
+
+        assert result == SECOND_HASH
+        assert len(posts) == 1
+
+    def test_a_hash_the_chain_does_know_is_left_alone(self, rig, monkeypatch):
+        result, posts = self._resend(rig, monkeypatch, sent=True)
+
+        assert result == BUY_HASH and posts == []
+
+    def test_a_wallet_already_holding_shares_is_never_resent(self, rig, monkeypatch):
+        """A mint that did land shows up as a balance, and resending would buy twice."""
+        result, posts = self._resend(rig, monkeypatch, holds=1_314_422)
+
+        assert result == BUY_HASH and posts == []
+
+    def test_it_does_nothing_unless_the_profile_asks(self, rig, monkeypatch):
+        result, posts = self._resend(rig, monkeypatch, retry=False)
+
+        assert result == BUY_HASH and posts == []
+
+    def test_the_resend_carries_a_fresh_timestamp(self, rig, monkeypatch):
+        _result, posts = self._resend(rig, monkeypatch)
+
+        assert posts[0]["variables"]["mint"]["ms_ts"] != "1"
+        assert posts[0]["variables"]["mint"]["market"] == POOL
+
+    def test_both_hashes_are_kept(self, rig, monkeypatch):
+        self._resend(rig, monkeypatch)
+        rows = rig.ledger.conn.execute(
+            "SELECT attempt, tx_hash FROM buy_attempts ORDER BY attempt").fetchall()
+
+        assert [r[1] for r in rows] == [BUY_HASH, SECOND_HASH]
+
+    def test_it_never_loops(self, rig, monkeypatch):
+        """One resend per Round. A venue answering with phantoms forever must not be
+        answered with an unbounded stream of purchases."""
+        _result, posts = self._resend(rig, monkeypatch)
+
+        assert len(posts) == 1
+
+
+class TestWhenTheResendIsRefusedByTiming:
+    def test_it_does_not_resend_too_near_the_cutoff(self, rig, monkeypatch):
+        """A purchase inside the last seventy-five seconds would be refused anyway."""
+        rig.broker.profile = {**rig.broker.profile, "retry_unsubmitted_buy": True}
+        monkeypatch.setattr("strategy_lab.execution.live.time.sleep", lambda s: None)
+        monkeypatch.setattr(rig.broker, "chain_knows", lambda tx: False)
+        monkeypatch.setattr(rig.broker, "balance", lambda token: 0)
+        posts = []
+        monkeypatch.setattr("strategy_lab.execution.live.requests.post",
+                            lambda url, **kw: posts.append(kw) or (_ for _ in ()).throw(
+                                AssertionError("must not post")))
+
+        position = {"id": "q" * 64, "ending": int(time.time()) + 10, "pool": POOL,
+                    "outcome": UP}
+        payload = {"query": "q", "variables": {"mint": {"ms_ts": "1"}}}
+        result = rig.broker.settle_submission(position, payload, BUY_HASH, "0xshare")
+
+        assert result == BUY_HASH and posts == []
+
+    def test_an_unreadable_chain_keeps_the_first_hash(self, rig, monkeypatch):
+        """Unsure is not the same as sure it never went."""
+        from strategy_lab.execution.errors import SetupError
+        rig.broker.profile = {**rig.broker.profile, "retry_unsubmitted_buy": True}
+        monkeypatch.setattr("strategy_lab.execution.live.time.sleep", lambda s: None)
+
+        def unreachable(tx):
+            raise SetupError("RPC_REQUEST: down")
+
+        monkeypatch.setattr(rig.broker, "chain_knows", unreachable)
+        posts = []
+        monkeypatch.setattr("strategy_lab.execution.live.requests.post",
+                            lambda url, **kw: posts.append(kw))
+
+        position = {"id": "r" * 64, "ending": NOW + 600, "pool": POOL, "outcome": UP}
+        payload = {"query": "q", "variables": {"mint": {"ms_ts": "1"}}}
+        result = rig.broker.settle_submission(position, payload, BUY_HASH, "0xshare")
+
+        assert result == BUY_HASH and posts == []
