@@ -1,4 +1,5 @@
-"""Accounts API buy + locally signed Arbitrum payoff, with durable at-most-once intent.
+"""Accounts API or locally signed direct buy + locally signed Arbitrum payoff, with
+durable at-most-once intent.
 
 Only the explicit live CLI constructs this adapter. HTTP acknowledgements never credit
 cash. Unknown API submissions skip their Round while retaining funds for reconciliation.
@@ -13,8 +14,9 @@ from eth_abi import decode, encode
 from eth_account import Account
 from eth_utils import keccak, to_checksum_address
 
-from .accounts import (CLAIMANT, ENDPOINT, USDC, ZERO, address, claim_transaction,
-                       hex_value, inspect_receipt, mint_hash, mint_payload)
+from .accounts import (CLAIMANT, ENDPOINT, USDC, ZERO, address, allowance_slot,
+                       approve_data, claim_transaction, direct_mint_data, hex_value,
+                       inspect_receipt, mint_hash, mint_payload)
 from .config import Settings
 from .errors import QuoteRefused, SetupError, NotSubmitted, BuyUncertain
 from .paper import Quote, Receipt
@@ -99,8 +101,12 @@ class LiveBroker:
         self.account = account
         if self.account.address.lower() != self.wallet:
             raise SetupError("PRIVATE_KEY_MISMATCH: claim signing key does not match configured wallet address")
+        # "api" asks the Accounts relayer to mint; "direct" signs the pool's mint here.
+        self.buy_route = profile.get("buy_route", "api")
+        if self.buy_route not in ("api", "direct"):
+            raise SetupError('CONFIG_BUY_ROUTE: buy_route must be "api" or "direct"')
         self.auth = os.environ.get(profile["authorization_env"], "")
-        if not self.auth.strip() or any(c in self.auth for c in "\r\n"):
+        if self.buy_route == "api" and (not self.auth.strip() or any(c in self.auth for c in "\r\n")):
             raise SetupError("AUTHORIZATION_MISSING: fill the selected Authorization environment variable with the full single-line value")
         self.max_trades = profile.get("max_trades", 1)
         self.gas_cap = profile.get("claim_gas_cap_wei", 100_000_000_000_000)
@@ -296,6 +302,8 @@ class LiveBroker:
                 or time.time() - snapshot.metadata_at > 15
                 or time.time() - snapshot.record.prices[-1][0] > 15):
             raise NotSubmitted("timing expired while capturing recovery block")
+        if self.buy_route == "direct":
+            return self._submit_direct_buy(position, snapshot, share, from_block)
         payload = mint_payload(position["pool"], position["outcome"], int(time.time() * 1000))
         # Durable marker before HTTP. No transport retry and no redirect with credentials.
         with self.ledger.conn:
@@ -319,6 +327,77 @@ class LiveBroker:
         with self.ledger.conn:
             self.ledger.conn.execute("UPDATE live_ops SET tx_hash=? WHERE position_id=? AND operation='buy'",
                                      (tx, position["id"]))
+
+    def _submit_direct_buy(self, position, snapshot, share, from_block):
+        """Mint on the pool from this wallet, signed here, without the Accounts relayer.
+
+        The relayer can answer with a hash it never sends. Signing the mint here means
+        the hash recorded is the transaction itself. The pool pulls the stake from its
+        caller, so the wallet approves exactly the stake to this Round's pool first, in
+        the nonce before the mint. Everything is simulated, priced and signed before
+        anything is persisted or sent; nothing is ever re-sent.
+        """
+        stake = position["amount"]
+        pool = address(position["pool"])
+        allowance = self.rpc.view(USDC, "allowance(address,address)", ("address", "address"),
+                                  (to_checksum_address(self.wallet), to_checksum_address(pool)))[0]
+        approve = None
+        if allowance < stake:
+            approve = {"from": self.wallet, "to": USDC, "value": "0x0",
+                       "data": approve_data(pool, stake)}
+        mint = {"from": self.wallet, "to": pool, "value": "0x0",
+                "data": direct_mint_data(position["outcome"], stake, self.wallet)}
+        # Simulate the mint as it will run: after the approval has landed.
+        override = ([{USDC: {"stateDiff": {allowance_slot(self.wallet, pool): "0x" + f"{stake:064x}"}}}]
+                    if approve else [])
+        try:
+            simulated = int(self.rpc.call("eth_call", [mint, "latest", *override]), 16)
+            gas_mint = (int(self.rpc.call("eth_estimateGas", [mint, "latest", *override]), 16) * 120 + 99) // 100
+            gas_approve = ((int(self.rpc.call("eth_estimateGas", [approve]), 16) * 120 + 99) // 100
+                           if approve else 0)
+            gas_price = int(self.rpc.call("eth_gasPrice", []), 16) * 2
+            eth = int(self.rpc.call("eth_getBalance", [self.wallet, "latest"]), 16)
+            nonce = int(self.rpc.call("eth_getTransactionCount", [self.wallet, "pending"]), 16)
+            latest = int(self.rpc.call("eth_getTransactionCount", [self.wallet, "latest"]), 16)
+        except (SetupError, ValueError):
+            raise NotSubmitted("direct mint simulation or pricing failed") from None
+        if simulated < position["minimum_shares"]:
+            raise NotSubmitted("direct mint simulates below the quoted minimum")
+        if gas_price <= 0 or gas_mint <= 0 or max(gas_mint, gas_approve) * gas_price > self.gas_cap:
+            raise NotSubmitted("direct mint exceeds gas cap")
+        if eth < (gas_mint + gas_approve) * gas_price + self.gas_cap:
+            raise NotSubmitted("insufficient ETH for the mint and a later claim")
+        if nonce != latest:
+            raise NotSubmitted("wallet already has pending transactions")
+        signed = []
+        for tx, gas in ((approve, gas_approve), (mint, gas_mint)):
+            if tx:
+                body = {"chainId": 42161, "to": to_checksum_address(tx["to"]), "value": 0,
+                        "data": tx["data"], "nonce": nonce + len(signed), "gas": gas, "gasPrice": gas_price}
+                s = self.account.sign_transaction(body)
+                signed.append((body, "0x" + s.hash.hex(), "0x" + s.raw_transaction.hex()))
+        if (time.time() - position["created_at"] > 5 or position["ending"] - time.time() < 75
+                or time.time() - snapshot.metadata_at > 15
+                or time.time() - snapshot.record.prices[-1][0] > 15):
+            raise NotSubmitted("timing expired while preparing the direct mint")
+        mint_body, tx_hash, raw = signed[-1]
+        request = {"route": "direct", "simulated_shares": simulated, "mint": mint_body,
+                   "approve": {"tx": signed[0][0], "tx_hash": signed[0][1], "raw_tx": signed[0][2]}
+                              if approve else None}
+        # Persist the signed hashes BEFORE broadcasting. A crash never signs a new nonce,
+        # and the recorded hash is the transaction, so the existing recovery applies.
+        with self.ledger.conn:
+            self.ledger.conn.execute("INSERT INTO buy_recovery VALUES (?,?)", (position["id"], from_block))
+            self.ledger.conn.execute("INSERT INTO live_ops(position_id,operation,request,share_token,tx_hash,raw_tx,outcome_up,outcome_down) VALUES (?,'buy',?,?,?,?,?,?)",
+                (position["id"], json.dumps(request), share, tx_hash, raw,
+                 hex_value(snapshot.outcome_up, 8), hex_value(snapshot.outcome_down, 8)))
+        for _, expected, signed_raw in signed:
+            try:
+                returned = self.rpc.call("eth_sendRawTransaction", [signed_raw])
+            except (SetupError, ValueError):
+                raise BuyUncertain("BUY_BROADCAST: skipped Round; funds reserved for chain reconciliation") from None
+            if not isinstance(returned, str) or returned.lower() != expected:
+                raise BuyUncertain("BUY_BROADCAST_HASH: skipped Round; funds reserved for chain reconciliation")
 
     def lookup_buy(self, position):
         op = self.op(position, "buy")

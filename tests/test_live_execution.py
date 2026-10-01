@@ -1016,3 +1016,105 @@ class TestReleasingThePhantomStake:
 
         with pytest.raises(ValueError):
             rig.broker.attach_buy(identity, "0x" + "5c" * 32)
+
+
+# --- Direct route: the wallet signs the pool's mint itself, no Accounts relayer. ---
+
+class DirectRPC(FakeRPC):
+    def __init__(self, allowance=0, simulated=1314422):
+        super().__init__()
+        self.allowance, self.simulated, self.calls = allowance, simulated, []
+
+    def view(self, target, signature, inputs=(), values=(), outputs=(), block="latest"):
+        if signature == "allowance(address,address)":
+            return (self.allowance,)
+        return super().view(target, signature, inputs, values, outputs, block)
+
+    def call(self, method, params):
+        self.calls.append((method, params))
+        if method == "eth_call" and params[0]["to"] == POOL:
+            assert params[0]["data"].startswith("0x00000147")
+            return "0x" + format(self.simulated, "064x")
+        return super().call(method, params)
+
+
+@pytest.fixture
+def direct(rig, monkeypatch):
+    rig.profile["buy_route"] = "direct"
+    rig.rpc = DirectRPC()
+    rig.broker = LiveBroker(rig.ledger, rig.profile, "BTC", rig.rpc, rig.account)
+    return rig
+
+
+def sent(rig):
+    return [Account.recover_transaction(raw).lower() for raw in rig.rpc.broadcasts]
+
+
+def test_direct_buy_approves_the_stake_then_mints_without_the_relayer(direct):
+    engine = Executor(direct.settings, direct.ledger, direct.broker)
+    assert engine.enter(direct.snapshot, NOW) == "BUY_PENDING"
+    assert direct.posts == []
+    position = direct.ledger.positions()[0]
+    op = direct.broker.op(position, "buy")
+    request = json.loads(op["request"])
+    approve, mint = request["approve"]["tx"], request["mint"]
+    assert approve["to"].lower() == USDC and approve["nonce"] == 0
+    assert approve["data"] == "0x095ea7b3" + POOL[2:].rjust(64, "0") + format(1000000, "064x")
+    assert mint["to"].lower() == POOL and mint["nonce"] == 1
+    assert mint["data"] == ("0x00000147" + UP[2:].ljust(64, "0") + format(1000000, "064x")
+                            + "0" * 64 + direct.broker.wallet[2:].rjust(64, "0"))
+    # Approval first, then the mint whose hash is the one recorded.
+    assert direct.rpc.broadcasts == [request["approve"]["raw_tx"], op["raw_tx"]]
+    assert sent(direct) == [direct.broker.wallet] * 2
+    assert op["tx_hash"] == "0x" + keccak(bytes.fromhex(op["raw_tx"][2:])).hex()
+    # The mint was simulated as if the approval had already landed.
+    simulation = [p for m, p in direct.rpc.calls if m == "eth_call" and p[0]["to"] == POOL][0]
+    assert USDC in simulation[2]
+    direct.rpc.receipts[op["tx_hash"]] = receipt(direct.broker.wallet, op["tx_hash"], "buy")
+    engine.advance(NOW, direct.broker.settlement)
+    assert direct.ledger.get(position["id"])["state"] == "OPEN"
+
+
+def test_direct_buy_skips_the_approval_when_the_pool_is_already_allowed(direct):
+    direct.rpc.allowance = 1000000
+    Executor(direct.settings, direct.ledger, direct.broker).enter(direct.snapshot, NOW)
+    op = direct.broker.op(direct.ledger.positions()[0], "buy")
+    assert json.loads(op["request"])["approve"] is None
+    assert direct.rpc.broadcasts == [op["raw_tx"]]
+    simulation = [p for m, p in direct.rpc.calls if m == "eth_call" and p[0]["to"] == POOL][0]
+    assert len(simulation) == 2
+
+
+def test_direct_buy_sends_nothing_when_the_simulation_is_short(direct):
+    direct.rpc.simulated = 1000
+    engine = Executor(direct.settings, direct.ledger, direct.broker)
+    assert engine.enter(direct.snapshot, NOW) == "EXPIRED"
+    assert direct.rpc.broadcasts == []
+    assert direct.broker.op(direct.ledger.positions()[0], "buy") is None
+
+
+def test_direct_buy_refuses_with_a_pending_transaction(direct):
+    direct.rpc.pending_nonce = 1
+    assert Executor(direct.settings, direct.ledger, direct.broker).enter(direct.snapshot, NOW) == "EXPIRED"
+    assert direct.rpc.broadcasts == []
+
+
+def test_direct_buy_lost_broadcast_is_unknown_and_never_resent(direct):
+    direct.rpc.lose_ack = True
+    engine = Executor(direct.settings, direct.ledger, direct.broker)
+    assert engine.enter(direct.snapshot, NOW) == "BUY_UNKNOWN"
+    position = direct.ledger.positions()[0]
+    assert direct.broker.op(position, "buy")["tx_hash"]
+    for _ in range(3):
+        engine.enter(direct.snapshot, NOW)
+        engine.advance(NOW, direct.broker.settlement)
+    assert len(direct.rpc.broadcasts) == 1
+
+
+def test_direct_route_needs_no_authorization(rig, monkeypatch):
+    monkeypatch.delenv("NINELIVES_BTC_AUTHORIZATION")
+    with pytest.raises(Exception):
+        LiveBroker(rig.ledger, rig.profile, "BTC", rig.rpc, rig.account)
+    LiveBroker(rig.ledger, {**rig.profile, "buy_route": "direct"}, "BTC", rig.rpc, rig.account)
+    with pytest.raises(Exception, match="CONFIG_BUY_ROUTE"):
+        LiveBroker(rig.ledger, {**rig.profile, "buy_route": "relay"}, "BTC", rig.rpc, rig.account)

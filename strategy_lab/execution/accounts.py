@@ -102,6 +102,31 @@ def mint_hash(reply):
         raise ValueError("API did not return a transaction hash; reconcile before retry") from None
 
 
+# The pool's own mint, as the Accounts smart account calls it: (bytes8 outcome, uint256
+# amount, address referrer, address recipient). The pool pulls `amount` USDC from the
+# caller, so a wallet calling it directly needs an allowance to the pool first.
+MINT_SELECTOR = "0x00000147"
+# FiatToken's `allowed` mapping. Checked against allowance() on chain; it is used only to
+# simulate the mint before the approval exists, so a layout change fails the simulation.
+USDC_ALLOWANCE_SLOT = 10
+
+
+def direct_mint_data(outcome, amount, recipient):
+    return (MINT_SELECTOR + hex_value(outcome, 8)[2:].ljust(64, "0") + f"{amount:064x}"
+            + "0" * 64 + address(recipient)[2:].rjust(64, "0"))
+
+
+def approve_data(spender, amount):
+    return "0x095ea7b3" + address(spender)[2:].rjust(64, "0") + f"{amount:064x}"
+
+
+def allowance_slot(owner, spender):
+    from eth_utils import keccak
+    inner = keccak(bytes.fromhex(address(owner)[2:].rjust(64, "0"))
+                   + USDC_ALLOWANCE_SLOT.to_bytes(32, "big"))
+    return "0x" + keccak(bytes.fromhex(address(spender)[2:].rjust(64, "0")) + inner).hex()
+
+
 def claim_transaction(wallet, pool):
     """Unsigned payoff(address[]) for ONE pool; nonce/gas must be fresh at signing."""
     data = "0xeaca3a20" + f"{32:064x}{1:064x}" + address(pool)[2:].rjust(64, "0")
