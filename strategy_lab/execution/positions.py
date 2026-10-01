@@ -102,13 +102,6 @@ def report(ledger_path, rpc=None, now=None):
                 finalised = int(block["timestamp"], 16)
             except (SetupError, ValueError, KeyError, TypeError):
                 finalised = None
-            attempts = {}
-        try:
-            for row in conn.execute("SELECT position_id, COUNT(*) n FROM buy_attempts"
-                                    " GROUP BY position_id"):
-                attempts[row["position_id"]] = row["n"]
-        except sqlite3.Error:
-            attempts = {}      # a ledger written before resends existed
         lines = [f"{len(active)} open position(s):"]
         for position in active:
             buy = conn.execute(
@@ -127,9 +120,7 @@ def report(ledger_path, rpc=None, now=None):
                 f"  {position['id'][:12]} | {position['symbol']} {position['side']} "
                 f"| {position['state']} | stake {position['amount'] / 1e6:.2f} USDC "
                 f"| {when}"
-                + (f" | sent {attempts[position['id']]}x"
-                   if attempts.get(position["id"], 1) > 1 else "")
-                + f"\n      waiting on: {waiting_on(position, buy, now, winner, finalised)}")
+                f"\n      waiting on: {waiting_on(position, buy, now, winner, finalised)}")
         return "\n".join(lines)
     finally:
         conn.close()

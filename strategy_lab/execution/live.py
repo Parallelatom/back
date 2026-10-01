@@ -61,11 +61,6 @@ class RPC:
 
 
 
-# A mint that was really sent reaches an Arbitrum node in well under a second, so a few
-# seconds of silence already says it was never broadcast.
-UNSUBMITTED_CHECK_SECONDS = 3
-
-
 def settings_from_profile(profile, symbol, wallet):
     # Reuse the strict paper risk-value validation, then explicitly select live mode.
     open_limit = profile.get("max_open_positions", 1)
@@ -75,10 +70,6 @@ def settings_from_profile(profile, symbol, wallet):
                         wallet_label=wallet, strategy="Delta Edge", stake=1_000_000,
                         bankroll=10_000_000, max_open_positions=open_limit, max_exposure=10_000_000,
                         daily_spend=10_000_000, daily_loss=2_000_000, max_signal_age_seconds=15)
-    retry = profile.get("retry_unsubmitted_buy", False)
-    if type(retry) is not bool:
-        raise SetupError("CONFIG_RETRY_BUY: retry_unsubmitted_buy must be true or false"
-                         " without quotes")
     floor = profile.get("min_quote_shares_micro", 1_300_000)
     if type(floor) is not int or not 1_300_000 <= floor <= 100_000_000:
         raise SetupError("CONFIG_SHARE_FLOOR: min_quote_shares_micro must be an integer >= 1300000")
@@ -124,13 +115,6 @@ class LiveBroker:
                 request TEXT NOT NULL, tx_hash TEXT UNIQUE, raw_tx TEXT,
                 share_token TEXT NOT NULL, outcome_up TEXT, outcome_down TEXT,
                 gas_wei INTEGER, PRIMARY KEY(position_id,operation));
-            -- Every hash the mint API returned for one Round, the live one and any it
-            -- replaced. A retry must never make an attempt disappear: if two of them
-            -- land, accounting has to be able to see both.
-            CREATE TABLE IF NOT EXISTS buy_attempts (
-                position_id TEXT NOT NULL, attempt INTEGER NOT NULL, ts INTEGER NOT NULL,
-                tx_hash TEXT NOT NULL, landed INTEGER,
-                PRIMARY KEY(position_id, attempt));
             CREATE TABLE IF NOT EXISTS buy_recovery (
                 position_id TEXT PRIMARY KEY, from_block INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS live_flags (name TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -332,62 +316,9 @@ class LiveBroker:
             raise BuyUncertain("BUY_TIMEOUT: skipped Round; funds reserved for chain reconciliation") from None
         except requests.RequestException:
             raise BuyUncertain("BUY_NETWORK: skipped Round; funds reserved for chain reconciliation") from None
-        tx = self.settle_submission(position, payload, tx, share)
         with self.ledger.conn:
             self.ledger.conn.execute("UPDATE live_ops SET tx_hash=? WHERE position_id=? AND operation='buy'",
                                      (tx, position["id"]))
-
-    def record_attempt(self, position, attempt: int, tx_hash: str):
-        with self.ledger.conn:
-            self.ledger.conn.execute(
-                "INSERT OR IGNORE INTO buy_attempts(position_id,attempt,ts,tx_hash)"
-                " VALUES (?,?,?,?)", (position["id"], attempt, int(time.time()), tx_hash))
-
-    def settle_submission(self, position, payload, tx, share):
-        """Send once more when the chain has never heard of the hash we were given.
-
-        The venue has answered `ninelivesMint` with a hash for a transaction it never
-        broadcast — sixty times here, and on its own website too, so it is not something
-        this wallet or this client causes. None of those sixty ever appeared later: every
-        one ended BUY_NOT_OBSERVED with no share minted and no USDC moved.
-
-        That is what makes one more attempt defensible, and the care is in what could go
-        wrong anyway. A transaction genuinely sent reaches an Arbitrum node in well under
-        a second, so a few seconds of silence is already strong evidence; the wallet is
-        asked again for its share balance immediately before resending, because a mint
-        that did land would show there; and it is one retry, never a loop. Both hashes
-        are kept whichever way it goes.
-        """
-        self.record_attempt(position, 1, tx)
-        if self.profile.get("retry_unsubmitted_buy") is not True:
-            return tx
-        time.sleep(UNSUBMITTED_CHECK_SECONDS)
-        try:
-            if self.chain_knows(tx):
-                return tx
-            # A landed mint is visible here, and is the thing a retry must not duplicate.
-            if self.balance(share):
-                return tx
-            if position["ending"] - time.time() < 75:
-                return tx
-        except (SetupError, ValueError, TypeError):
-            return tx  # Unsure is not the same as sure it never went; keep the first.
-        retry = dict(payload)
-        retry["variables"] = {"mint": {**payload["variables"]["mint"],
-                                       "ms_ts": str(int(time.time() * 1000))}}
-        try:
-            response = requests.post(ENDPOINT, json=retry, headers={"Authorization": self.auth,
-                "Content-Type": "application/json", "Origin": "https://www.9lives.so",
-                "Referer": "https://www.9lives.so/"}, timeout=20, allow_redirects=False)
-            if response.status_code != 200:
-                return tx
-            second = mint_hash(response.json())
-        except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
-            return tx
-        if second == tx:
-            return tx
-        self.record_attempt(position, 2, second)
-        return second
 
     def lookup_buy(self, position):
         op = self.op(position, "buy")
