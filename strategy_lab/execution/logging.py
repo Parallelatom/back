@@ -12,6 +12,16 @@ def clock(ts, timezone):
     return datetime.fromtimestamp(ts, timezone).strftime("%H:%M:%S")
 
 
+def stamp(ts, timezone):
+    """The prefix of a line carries its date; times inside a line do not need one.
+
+    Without it every line is ambiguous across days. Grepping a log for 12:40 matched a
+    different day's Round and made a correct entry at +0.3692% look like a bot that had
+    bought on a delta of +0.0127%.
+    """
+    return datetime.fromtimestamp(ts, timezone).strftime("%m-%d %H:%M:%S")
+
+
 def market_status(snapshot, now, settings):
     if snapshot is None:
         return None
@@ -116,7 +126,7 @@ class LiveLog:
         if self.format == "json":
             self.emit(json.dumps({"logged_at": now, **report}))
             return
-        prefix = f"[{clock(now, self.timezone)}]"
+        prefix = f"[{stamp(now, self.timezone)}]"
         floor = report.get("min_quote_shares_micro")
         if floor and self.floor != floor:
             self.emit(f"{prefix} BUY FILTER | 1 USDC ต้องได้ quote > {floor/1e6:.6f} shares (เท่ากันก็ข้าม) | API ไม่รับประกันขั้นต่ำตอน fill")

@@ -379,3 +379,69 @@ class TestShowingWhatTheWalletHolds:
     def test_without_an_address_nothing_is_claimed(self, tmp_path):
         control = Control({"BTC": a_ledger(tmp_path)}, recordings(tmp_path))
         assert "wallet" not in control.handle("/status")
+
+
+class TestALogTwoWritersTouched:
+    """Switching the runners onto systemd while a nohup'd copy still held the file left
+    NUL bytes in it. Reading the tail then returned stale lines that looked current, and
+    a monitor reporting a stale price is worse than one reporting nothing."""
+
+    def test_nul_padding_is_dropped(self, tmp_path):
+        from strategy_lab.execution.notify import tail
+        path = tmp_path / "run.log"
+        path.write_bytes(b"[12:00:00] old line\n" + b"\x00" * 500 +
+                         b"[12:41:12] XYZCL | the current line\n")
+
+        answer = tail(str(path))
+
+        assert "the current line" in answer
+        assert "\x00" not in answer
+
+    def test_a_partial_first_line_is_discarded(self, tmp_path):
+        from strategy_lab.execution.notify import tail
+        path = tmp_path / "run.log"
+        path.write_bytes(b"x" * 9000 + b"\n[12:41:12] whole line\n")
+
+        answer = tail(str(path), lines=2)
+
+        assert answer.startswith("[12:41:12]")
+
+    def test_a_clean_log_is_unaffected(self, tmp_path):
+        from strategy_lab.execution.notify import tail
+        path = tmp_path / "run.log"
+        path.write_text("".join(f"[12:00:{n:02d}] line {n}\n" for n in range(40)))
+
+        assert "line 39" in tail(str(path))
+
+
+DATED_LOG = """\
+[10-01 12:40:06] ORDER BUY_PENDING | XYZCL UP | id=a | stake=1.00 USDC | จ่ายยืนยัน=0.000000 | shares=0.000000 | รับคืนยืนยัน=0.000000
+[10-01 12:45:40] REVIEW | BUY_HASH_UNKNOWN_TO_CHAIN: skipped Round
+[10-01 12:46:02] XYZCL | ราคา 89.168000 | Strike 88.840000 | Delta +0.3692% | เหลือ 03:49 | feed 12:46:00 อายุ 2s | รอ Delta เข้าเงื่อนไข
+"""
+
+
+class TestDatedLines:
+    """Lines carried only a time, so grepping a log for 12:40 matched every day and made
+    a correct entry at +0.3692% look like one taken on a delta of +0.0127%."""
+
+    def test_a_dated_line_still_parses(self):
+        from strategy_lab.execution.notify import format_log
+        answer = format_log(DATED_LOG)
+
+        assert "+0.3692%" in answer
+        assert "BUY_HASH_UNKNOWN_TO_CHAIN" in answer
+
+    def test_the_phone_view_shows_the_time_not_the_date(self):
+        from strategy_lab.execution.notify import format_log
+        answer = format_log(DATED_LOG)
+
+        assert "12:46:02" in answer
+        assert "10-01 12:46:02" not in answer
+
+    def test_an_undated_line_from_before_the_change_still_parses(self):
+        from strategy_lab.execution.notify import format_log
+        old = ("[12:46:02] XYZCL | ราคา 89.168000 | Strike 88.840000 | Delta +0.3692%"
+               " | เหลือ 03:49 | feed 12:46:00 อายุ 2s | รอ Delta เข้าเงื่อนไข\n")
+
+        assert "+0.3692%" in format_log(old)

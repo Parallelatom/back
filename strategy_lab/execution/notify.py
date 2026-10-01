@@ -225,13 +225,13 @@ def reset_loss(symbol: str, ledger: str) -> str:
 # A heartbeat line carries the whole market state and repeats every few seconds, so the
 # last one is the state and the ones before it are noise. Events are what is worth reading.
 HEARTBEAT = re.compile(
-    r"^\[(?P<at>[\d:]+)\]\s+(?P<symbol>\w+)\s+\|\s+ราคา\s+(?P<price>[\d,.]+)"
+    r"^\[(?P<at>[^\]]+)\]\s+(?P<symbol>\w+)\s+\|\s+ราคา\s+(?P<price>[\d,.]+)"
     r".*?Strike\s+(?P<strike>[\d,.]+).*?Delta\s+(?P<delta>[+\-][\d.]+%)"
     r".*?เหลือ\s+(?P<left>[\d:]+).*?อายุ\s+(?P<age>\d+)s\s+\|\s+(?P<why>.+)$")
 ORDER = re.compile(
-    r"^\[(?P<at>[\d:]+)\]\s+ORDER\s+(?P<state>\w+)\s+\|\s+\w+\s+(?P<side>UP|DOWN)"
+    r"^\[(?P<at>[^\]]+)\]\s+ORDER\s+(?P<state>\w+)\s+\|\s+\w+\s+(?P<side>UP|DOWN)"
     r".*?shares=(?P<shares>[\d.]+).*?รับคืนยืนยัน=(?P<back>[\d.]+)")
-REVIEW = re.compile(r"^\[(?P<at>[\d:]+)\]\s+REVIEW\s+\|\s+(?P<note>.+)$")
+REVIEW = re.compile(r"^\[(?P<at>[^\]]+)\]\s+REVIEW\s+\|\s+(?P<note>.+)$")
 
 
 def format_log(text: str, events: int = 6) -> str:
@@ -240,6 +240,7 @@ def format_log(text: str, events: int = 6) -> str:
     Falls back to the raw tail if the shape is not recognised, because a log that cannot
     be parsed is exactly when its literal contents matter most.
     """
+    at = lambda value: value.split()[-1]
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
         return "log is empty"
@@ -256,16 +257,16 @@ def format_log(text: str, events: int = 6) -> str:
             mark = {"REDEEMED": "✅", "LOST": "❌", "OPEN": "🟡", "EXPIRED": "⚪️"}.get(
                 row["state"], "•")
             gain = f" +{back - 1:.3f}" if row["state"] == "REDEEMED" and back else ""
-            history.append(f"{row['at']} {mark} {row['state']} {row['side']}{gain}")
+            history.append(f"{at(row['at'])} {mark} {row['state']} {row['side']}{gain}")
             continue
         note = REVIEW.match(line)
         if note:
-            history.append(f"{note['at']} ⚠️ {note['note'][:60]}")
+            history.append(f"{at(note['at'])} ⚠️ {note['note'][:60]}")
     if state is None:
         return "```\n" + "\n".join(lines[-8:]) + "\n```"
     # Six decimals of a Bitcoin price is four characters of noise on a narrow screen.
     trim = lambda value: value.rstrip("0").rstrip(".") if "." in value else value
-    out = [f"*{state['symbol']}* · {state['at']}",
+    out = [f"*{state['symbol']}* · {at(state['at'])}",
            f"Δ {state['delta']}  ·  {state['left']} left",
            f"{trim(state['price'])} vs {trim(state['strike'])}",
            f"feed {state['age']}s",
@@ -276,16 +277,28 @@ def format_log(text: str, events: int = 6) -> str:
 
 
 def tail(path: str, lines: int = 15) -> str:
+    """The last lines of a log, tolerating a file two writers have been appending to.
+
+    Moving the runners onto systemd while a nohup'd copy still held the same file left
+    NUL bytes in it — grep calls such a file binary, and reading its tail returned stale
+    lines that looked current. A monitor that quietly reports a stale price is worse than
+    one that reports nothing, so the padding is dropped and only whole lines are kept.
+    """
     try:
         with open(path, "rb") as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
             block = min(size, lines * 400)
             handle.seek(size - block)
-            text = handle.read().decode("utf-8", "replace")
+            raw = handle.read()
     except OSError as exc:
         return f"cannot read the log ({type(exc).__name__})"
-    return "\n".join(text.splitlines()[-lines:]) or "log is empty"
+    text = raw.replace(b"\x00", b"").decode("utf-8", "replace")
+    kept = [line for line in text.splitlines() if line.strip()]
+    # A partial first line is whatever the read landed in the middle of.
+    if kept and len(raw) >= block and not kept[0].startswith("["):
+        kept = kept[1:]
+    return "\n".join(kept[-lines:]) or "log is empty"
 
 
 class Telegram:
