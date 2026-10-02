@@ -7,6 +7,7 @@ cash. Unknown API submissions skip their Round while retaining funds for reconci
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import requests
@@ -339,28 +340,39 @@ class LiveBroker:
         """
         stake = position["amount"]
         pool = address(position["pool"])
-        allowance = self.rpc.view(USDC, "allowance(address,address)", ("address", "address"),
-                                  (to_checksum_address(self.wallet), to_checksum_address(pool)))[0]
-        approve = None
-        if allowance < stake:
-            approve = {"from": self.wallet, "to": USDC, "value": "0x0",
-                       "data": approve_data(pool, stake)}
+        approve = {"from": self.wallet, "to": USDC, "value": "0x0",
+                   "data": approve_data(pool, stake)}
         mint = {"from": self.wallet, "to": pool, "value": "0x0",
                 "data": direct_mint_data(position["outcome"], stake, self.wallet)}
-        # Simulate the mint as it will run: after the approval has landed.
-        override = ([{USDC: {"stateDiff": {allowance_slot(self.wallet, pool): "0x" + f"{stake:064x}"}}}]
-                    if approve else [])
+        # Simulate the mint as it will run: after the approval has landed. Setting the
+        # allowance to the stake is harmless when it is already there.
+        override = {USDC: {"stateDiff": {allowance_slot(self.wallet, pool): "0x" + f"{stake:064x}"}}}
+        reads = {
+            "allowance": lambda: self.rpc.view(USDC, "allowance(address,address)", ("address", "address"),
+                (to_checksum_address(self.wallet), to_checksum_address(pool)))[0],
+            "simulated": lambda: int(self.rpc.call("eth_call", [mint, "latest", override]), 16),
+            "gas_mint": lambda: int(self.rpc.call("eth_estimateGas", [mint, "latest", override]), 16),
+            "gas_approve": lambda: int(self.rpc.call("eth_estimateGas", [approve]), 16),
+            "gas_price": lambda: int(self.rpc.call("eth_gasPrice", []), 16),
+            "eth": lambda: int(self.rpc.call("eth_getBalance", [self.wallet, "latest"]), 16),
+            "nonce": lambda: int(self.rpc.call("eth_getTransactionCount", [self.wallet, "pending"]), 16),
+            "latest": lambda: int(self.rpc.call("eth_getTransactionCount", [self.wallet, "latest"]), 16),
+        }
+        # In sequence these reads take about as long as the whole 5-second budget from
+        # decision to broadcast. None depends on another, so ask them all at once.
+        with ThreadPoolExecutor(len(reads)) as pool_:
+            futures = {name: pool_.submit(read) for name, read in reads.items()}
         try:
-            simulated = int(self.rpc.call("eth_call", [mint, "latest", *override]), 16)
-            gas_mint = (int(self.rpc.call("eth_estimateGas", [mint, "latest", *override]), 16) * 120 + 99) // 100
-            gas_approve = ((int(self.rpc.call("eth_estimateGas", [approve]), 16) * 120 + 99) // 100
-                           if approve else 0)
-            gas_price = int(self.rpc.call("eth_gasPrice", []), 16) * 2
-            eth = int(self.rpc.call("eth_getBalance", [self.wallet, "latest"]), 16)
-            nonce = int(self.rpc.call("eth_getTransactionCount", [self.wallet, "pending"]), 16)
-            latest = int(self.rpc.call("eth_getTransactionCount", [self.wallet, "latest"]), 16)
+            got = {name: future.result() for name, future in futures.items()}
         except (SetupError, ValueError):
             raise NotSubmitted("direct mint simulation or pricing failed") from None
+        simulated, nonce, latest, eth = got["simulated"], got["nonce"], got["latest"], got["eth"]
+        gas_price = got["gas_price"] * 2
+        gas_mint = (got["gas_mint"] * 120 + 99) // 100
+        if got["allowance"] >= stake:
+            approve, gas_approve = None, 0
+        else:
+            gas_approve = (got["gas_approve"] * 120 + 99) // 100
         if simulated < position["minimum_shares"]:
             raise NotSubmitted("direct mint simulates below the quoted minimum")
         if gas_price <= 0 or gas_mint <= 0 or max(gas_mint, gas_approve) * gas_price > self.gas_cap:

@@ -72,9 +72,9 @@ class Executor:
                 self.broker.submit_buy(self.ledger.get(identity), snapshot)
             except BuyUncertain as exc:
                 self.ledger.transition(identity, "BUY_PENDING", "BUY_UNKNOWN", int(time.time()), error=str(exc))
-            except NotSubmitted:
+            except NotSubmitted as exc:
                 self.ledger.transition(identity, "BUY_PENDING", "EXPIRED", int(time.time()),
-                                       error="buy cancelled before submission; no API request sent")
+                                       error=f"buy cancelled before submission ({exc}); nothing sent")
             except Exception as exc:
                 self._unknown(identity, "BUY_PENDING", now, exc)
         return self.ledger.get(identity)["state"]

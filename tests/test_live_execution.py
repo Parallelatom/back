@@ -1081,14 +1081,15 @@ def test_direct_buy_skips_the_approval_when_the_pool_is_already_allowed(direct):
     op = direct.broker.op(direct.ledger.positions()[0], "buy")
     assert json.loads(op["request"])["approve"] is None
     assert direct.rpc.broadcasts == [op["raw_tx"]]
-    simulation = [p for m, p in direct.rpc.calls if m == "eth_call" and p[0]["to"] == POOL][0]
-    assert len(simulation) == 2
+    assert json.loads(op["request"])["mint"]["nonce"] == 0
 
 
 def test_direct_buy_sends_nothing_when_the_simulation_is_short(direct):
     direct.rpc.simulated = 1000
     engine = Executor(direct.settings, direct.ledger, direct.broker)
     assert engine.enter(direct.snapshot, NOW) == "EXPIRED"
+    # The log says why, not only that it was cancelled.
+    assert "below the quoted minimum" in direct.ledger.positions()[0]["error"]
     assert direct.rpc.broadcasts == []
     assert direct.broker.op(direct.ledger.positions()[0], "buy") is None
 
@@ -1118,3 +1119,28 @@ def test_direct_route_needs_no_authorization(rig, monkeypatch):
     LiveBroker(rig.ledger, {**rig.profile, "buy_route": "direct"}, "BTC", rig.rpc, rig.account)
     with pytest.raises(Exception, match="CONFIG_BUY_ROUTE"):
         LiveBroker(rig.ledger, {**rig.profile, "buy_route": "relay"}, "BTC", rig.rpc, rig.account)
+
+
+def test_direct_buy_prepares_its_reads_at_once(direct, monkeypatch):
+    # Ten sequential reads at ~0.45s each used up the 5-second budget on the VPS.
+    clock = [NOW]
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: clock[0])
+    import threading
+    started, barrier = [], threading.Barrier(8, timeout=2)
+    inner = direct.rpc.call
+    def call(method, params):
+        if method in ("eth_call", "eth_estimateGas", "eth_gasPrice", "eth_getBalance",
+                      "eth_getTransactionCount"):
+            started.append(method)
+            barrier.wait()  # deadlocks (BrokenBarrierError) unless all eight run together
+        return inner(method, params)
+    monkeypatch.setattr(direct.rpc, "call", call)
+    view = direct.rpc.view
+    def slow_view(*a, **k):
+        if a[1] == "allowance(address,address)":
+            started.append("allowance")
+            barrier.wait()
+        return view(*a, **k)
+    monkeypatch.setattr(direct.rpc, "view", slow_view)
+    monkeypatch.setattr(direct.broker, "quote", lambda *a: __import__("strategy_lab.execution.paper", fromlist=["Quote"]).Quote(1314422, NOW))
+    assert Executor(direct.settings, direct.ledger, direct.broker).enter(direct.snapshot, NOW) == "BUY_PENDING"
