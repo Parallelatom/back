@@ -445,3 +445,23 @@ class TestDatedLines:
                " | เหลือ 03:49 | feed 12:46:00 อายุ 2s | รอ Delta เข้าเงื่อนไข\n")
 
         assert "+0.3692%" in format_log(old)
+
+
+class TestBuyRoute:
+    def test_status_says_when_buys_have_moved_off_the_relayer(self, tmp_path):
+        ledger = a_ledger(tmp_path)
+        conn = sqlite3.connect(ledger)
+        conn.execute("INSERT INTO live_flags VALUES ('direct_until', ?)", (str(int(time.time()) + 2 * 3600 + 300),))
+        conn.commit()
+        conn.close()
+        answer = status("BTC", ledger, recordings(tmp_path))
+        assert "buying direct 2h0" in answer
+        assert max(len(line) for line in answer.splitlines()) <= 48
+
+    def test_status_is_quiet_once_the_window_has_passed(self, tmp_path):
+        ledger = a_ledger(tmp_path)
+        conn = sqlite3.connect(ledger)
+        conn.execute("INSERT INTO live_flags VALUES ('direct_until', ?)", (str(int(time.time()) - 1),))
+        conn.commit()
+        conn.close()
+        assert "direct" not in status("BTC", ledger, recordings(tmp_path))

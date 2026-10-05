@@ -1144,3 +1144,70 @@ def test_direct_buy_prepares_its_reads_at_once(direct, monkeypatch):
     monkeypatch.setattr(direct.rpc, "view", slow_view)
     monkeypatch.setattr(direct.broker, "quote", lambda *a: __import__("strategy_lab.execution.paper", fromlist=["Quote"]).Quote(1314422, NOW))
     assert Executor(direct.settings, direct.ledger, direct.broker).enter(direct.snapshot, NOW) == "BUY_PENDING"
+
+
+# --- Auto route: the relayer until it fails a buy, then direct for a while. ---
+
+@pytest.fixture
+def auto(rig):
+    rig.profile.update(buy_route="auto", auto_direct_hours=6)
+    rig.rpc = DirectRPC()
+    rig.broker = LiveBroker(rig.ledger, rig.profile, "BTC", rig.rpc, rig.account)
+    return rig
+
+
+def test_auto_uses_the_relayer_while_it_works(auto):
+    Executor(auto.settings, auto.ledger, auto.broker).enter(auto.snapshot, NOW)
+    assert len(auto.posts) == 1 and auto.rpc.broadcasts == []
+    assert auto.broker.route() == "api"
+
+
+def test_auto_switches_to_direct_after_a_phantom_hash(auto, monkeypatch):
+    engine = Executor(auto.settings, auto.ledger, auto.broker)
+    engine.enter(auto.snapshot, NOW)
+    identity = auto.ledger.positions()[0]["id"]
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: END + 1)
+    engine.advance(END + 1, auto.broker.settlement)
+    position = auto.ledger.get(identity)
+    assert position["state"] == "BUY_UNKNOWN"
+    assert "UNKNOWN_TO_CHAIN" in position["error"] and "buying direct for 6h" in position["error"]
+    assert auto.broker.route() == "direct"
+    # Back to the relayer once the window has passed.
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: END + 1 + 6 * 3600)
+    assert auto.broker.route() == "api"
+
+
+@pytest.mark.parametrize("status,body", [(502, {}), (200, {"errors": [{"message": "x"}]})])
+def test_auto_switches_to_direct_after_a_relayer_error(auto, monkeypatch, status, body):
+    monkeypatch.setattr("strategy_lab.execution.live.requests.post",
+                        lambda *a, **k: SimpleNamespace(status_code=status, json=lambda: body))
+    assert Executor(auto.settings, auto.ledger, auto.broker).enter(auto.snapshot, NOW) == "BUY_UNKNOWN"
+    assert auto.broker.route() == "direct"
+
+
+def test_auto_timeout_does_not_switch(auto, monkeypatch):
+    # A timeout may be this server's network, not the relayer, so it proves nothing.
+    def post(*a, **k): raise requests.Timeout()
+    monkeypatch.setattr("strategy_lab.execution.live.requests.post", post)
+    Executor(auto.settings, auto.ledger, auto.broker).enter(auto.snapshot, NOW)
+    assert auto.broker.route() == "api"
+
+
+def test_auto_buys_direct_while_switched(auto):
+    with auto.ledger.conn:
+        auto.ledger.conn.execute("INSERT INTO live_flags VALUES ('direct_until',?)", (str(NOW + 60),))
+    Executor(auto.settings, auto.ledger, auto.broker).enter(auto.snapshot, NOW)
+    assert auto.posts == [] and len(auto.rpc.broadcasts) == 2
+
+
+def test_direct_and_api_routes_never_switch(rig, monkeypatch):
+    monkeypatch.setattr("strategy_lab.execution.live.requests.post",
+                        lambda *a, **k: SimpleNamespace(status_code=502, json=lambda: {}))
+    Executor(rig.settings, rig.ledger, rig.broker).enter(rig.snapshot, NOW)
+    assert rig.broker.route() == "api"
+    assert rig.ledger.conn.execute("SELECT 1 FROM live_flags WHERE name='direct_until'").fetchone() is None
+
+
+def test_auto_direct_hours_is_validated(rig):
+    with pytest.raises(Exception, match="CONFIG_AUTO_DIRECT_HOURS"):
+        LiveBroker(rig.ledger, {**rig.profile, "buy_route": "auto", "auto_direct_hours": 0}, "BTC", rig.rpc, rig.account)

@@ -102,12 +102,16 @@ class LiveBroker:
         self.account = account
         if self.account.address.lower() != self.wallet:
             raise SetupError("PRIVATE_KEY_MISMATCH: claim signing key does not match configured wallet address")
-        # "api" asks the Accounts relayer to mint; "direct" signs the pool's mint here.
+        # "api" asks the Accounts relayer to mint; "direct" signs the pool's mint here;
+        # "auto" uses the relayer until it fails a buy, then buys direct for a while.
         self.buy_route = profile.get("buy_route", "api")
-        if self.buy_route not in ("api", "direct"):
-            raise SetupError('CONFIG_BUY_ROUTE: buy_route must be "api" or "direct"')
+        if self.buy_route not in ("api", "direct", "auto"):
+            raise SetupError('CONFIG_BUY_ROUTE: buy_route must be "api", "direct" or "auto"')
+        self.direct_hours = profile.get("auto_direct_hours", 6)
+        if type(self.direct_hours) is not int or not 1 <= self.direct_hours <= 72:
+            raise SetupError("CONFIG_AUTO_DIRECT_HOURS: auto_direct_hours must be an integer from 1 to 72")
         self.auth = os.environ.get(profile["authorization_env"], "")
-        if self.buy_route == "api" and (not self.auth.strip() or any(c in self.auth for c in "\r\n")):
+        if self.buy_route != "direct" and (not self.auth.strip() or any(c in self.auth for c in "\r\n")):
             raise SetupError("AUTHORIZATION_MISSING: fill the selected Authorization environment variable with the full single-line value")
         self.max_trades = profile.get("max_trades", 1)
         self.gas_cap = profile.get("claim_gas_cap_wei", 100_000_000_000_000)
@@ -225,6 +229,24 @@ class LiveBroker:
         with self.ledger.conn:
             self.ledger.conn.execute("INSERT OR REPLACE INTO live_flags VALUES ('halt',?)", (reason,))
 
+    def route(self):
+        """The route the next buy takes: the configured one, or under "auto" the relayer
+        unless it has recently failed a buy."""
+        if self.buy_route != "auto":
+            return self.buy_route
+        row = self.ledger.conn.execute("SELECT value FROM live_flags WHERE name='direct_until'").fetchone()
+        return "direct" if row and int(row[0]) > time.time() else "api"
+
+    def relayer_failed(self, reason):
+        """Under "auto", buy direct for the next few hours. Returns the reason to record,
+        saying so, so the switch shows in the log and Telegram."""
+        if self.buy_route != "auto":
+            return reason
+        until = int(time.time()) + self.direct_hours * 3600
+        with self.ledger.conn:
+            self.ledger.conn.execute("INSERT OR REPLACE INTO live_flags VALUES ('direct_until',?)", (str(until),))
+        return f"{reason}; buying direct for {self.direct_hours}h"
+
     def entry_block(self, exclude_id=None):
         row = self.ledger.conn.execute("SELECT value FROM live_flags WHERE name='halt'").fetchone()
         if row:
@@ -303,7 +325,7 @@ class LiveBroker:
                 or time.time() - snapshot.metadata_at > 15
                 or time.time() - snapshot.record.prices[-1][0] > 15):
             raise NotSubmitted("timing expired while capturing recovery block")
-        if self.buy_route == "direct":
+        if self.route() == "direct":
             return self._submit_direct_buy(position, snapshot, share, from_block)
         payload = mint_payload(position["pool"], position["outcome"], int(time.time() * 1000))
         # Durable marker before HTTP. No transport retry and no redirect with credentials.
@@ -316,11 +338,13 @@ class LiveBroker:
                 "Content-Type": "application/json", "Origin": "https://www.9lives.so",
                 "Referer": "https://www.9lives.so/"}, timeout=20, allow_redirects=False)
             if response.status_code != 200:
-                raise BuyUncertain(f"BUY_HTTP_{int(response.status_code)}: skipped Round; funds reserved for chain reconciliation")
+                raise BuyUncertain(self.relayer_failed(
+                    f"BUY_HTTP_{int(response.status_code)}: skipped Round; funds reserved for chain reconciliation"))
             try:
                 tx = mint_hash(response.json())
             except (ValueError, TypeError, KeyError, AttributeError):
-                raise BuyUncertain("BUY_RESPONSE_NO_HASH: skipped Round; funds reserved for chain reconciliation") from None
+                raise BuyUncertain(self.relayer_failed(
+                    "BUY_RESPONSE_NO_HASH: skipped Round; funds reserved for chain reconciliation")) from None
         except requests.Timeout:
             raise BuyUncertain("BUY_TIMEOUT: skipped Round; funds reserved for chain reconciliation") from None
         except requests.RequestException:
@@ -426,8 +450,12 @@ class LiveBroker:
             # the stake reserved and frees the entry slot, and the same recovery that
             # handles a missing acknowledgement then proves on chain whether anything
             # happened before releasing it.
-            self.ledger.transition(position["id"], "BUY_PENDING", "BUY_UNKNOWN", int(time.time()),
-                error="BUY_HASH_UNKNOWN_TO_CHAIN: skipped Round; funds reserved for chain reconciliation")
+            # Only the relayer can hand back a hash it never sent; a direct buy's hash is
+            # the signed transaction. So this is the relayer failing, whatever the route now.
+            reason = "BUY_HASH_UNKNOWN_TO_CHAIN: skipped Round; funds reserved for chain reconciliation"
+            if json.loads(op["request"]).get("route") != "direct":
+                reason = self.relayer_failed(reason)
+            self.ledger.transition(position["id"], "BUY_PENDING", "BUY_UNKNOWN", int(time.time()), error=reason)
             return None
         elif op and position["state"] == "BUY_UNKNOWN":
             # Ambiguity reached with a hash recorded, which only happens once that hash has

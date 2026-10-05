@@ -129,6 +129,9 @@ def status(symbol: str, ledger: str, recordings: str, address=None) -> str:
                                    and age > FEED_SILENCE_SECONDS else ""))
     if halted:
         lines.append(f"stopped: {flags['halt'][:70]}")
+    left = int(flags.get("direct_until", 0)) - int(time.time())
+    if left > 0:
+        lines.append(f"relayer failed · buying direct {left // 3600}h{left % 3600 // 60:02d}m more")
     if session:
         lines.append(f"session {session['wins']}/{session['settled']} won"
                      f"  ·  net {session['net']:+.3f}")
