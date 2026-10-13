@@ -46,6 +46,10 @@ WS_PING_INTERVAL = 15
 WS_PING_TIMEOUT = 10
 RETRY_MIN = 1
 RETRY_MAX = 30
+# Prices arrive every few seconds. After an upstream outage the server can keep a
+# connection open, answering pings, while never sending on it again; only a new
+# connection gets prices. So a price feed this quiet is reconnected, not waited on.
+FEED_IDLE_SECONDS = float(os.environ.get("STRATEGY_LAB_FEED_IDLE_SECONDS", "60"))
 
 
 async def poll_rounds(ingest: Ingest, graph: Graph, stop: asyncio.Event) -> None:
@@ -274,7 +278,13 @@ async def stream_feed(subscription, ingest: Ingest, stop: asyncio.Event) -> None
                 await socket.send(_dumps(subscription))
                 log.info("feed connected: %s", label)
                 backoff = RETRY_MIN
-                async for raw in socket:
+                # Pool tables can be quiet for long stretches; only price feeds have a pulse.
+                idle = FEED_IDLE_SECONDS if label in sources.SYMBOLS else None
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(socket.recv(), idle)
+                    except asyncio.TimeoutError:
+                        raise ConnectionError(f"no message for {idle:.0f}s on an open connection") from None
                     message = sources.decode(raw)
                     if message is not None:
                         ingest.observe_feed_message(message)

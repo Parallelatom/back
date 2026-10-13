@@ -161,3 +161,53 @@ def test_bad_round_numbers_are_rejected_before_recording():
     payload["ending"] = T0 + 900
     payload["priceMetadata"]["priceTargetForUp"] = "NaN"
     assert sources.parse_round("BTC", payload) is None
+
+
+class _SilentSocket:
+    """Open, answering pings, never sending: how the feed looked after an outage."""
+    def __init__(self, connects):
+        self.connects = connects
+
+    async def __aenter__(self):
+        self.connects.append(1)
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def send(self, payload):
+        pass
+
+    async def recv(self):
+        await asyncio.sleep(3600)
+
+
+def _run_stream(ingest, monkeypatch, label, seconds):
+    connects = []
+    monkeypatch.setattr(collector, "FEED_IDLE_SECONDS", 0.05)
+    monkeypatch.setattr(collector, "RETRY_MIN", 0.01)
+    monkeypatch.setattr(collector.websockets, "connect", lambda *a, **k: _SilentSocket(connects))
+
+    async def drive():
+        stop = asyncio.Event()
+        task = asyncio.ensure_future(collector.stream_feed({"label": label}, ingest, stop))
+        await asyncio.sleep(seconds)
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(drive())
+    return connects
+
+
+def test_a_silent_price_feed_is_reconnected(ingest, monkeypatch):
+    assert len(_run_stream(ingest, monkeypatch, "BTC", 0.4)) >= 2
+    gaps = [r[0] for r in ingest.conn.execute("SELECT note FROM collector_gaps")]
+    assert any("no message for" in g for g in gaps)
+
+
+def test_a_quiet_pool_table_is_left_alone(ingest, monkeypatch):
+    assert len(_run_stream(ingest, monkeypatch, sources.POOL_TABLES[0], 0.3)) == 1
