@@ -17,6 +17,7 @@ from strategy_lab.execution.engine import Executor
 from strategy_lab.execution.live import LiveBroker, settings_from_profile
 from strategy_lab.execution.signals import Snapshot, decide
 from strategy_lab.execution.store import Ledger
+from strategy_lab.execution.errors import SetupError
 
 POOL = "0x" + "22" * 20
 SHARE = "0x" + "33" * 20
@@ -1211,3 +1212,43 @@ def test_direct_and_api_routes_never_switch(rig, monkeypatch):
 def test_auto_direct_hours_is_validated(rig):
     with pytest.raises(Exception, match="CONFIG_AUTO_DIRECT_HOURS"):
         LiveBroker(rig.ledger, {**rig.profile, "buy_route": "auto", "auto_direct_hours": 0}, "BTC", rig.rpc, rig.account)
+
+
+def test_claim_that_failed_before_signing_is_tried_again_by_itself(rig, monkeypatch):
+    # An RPC failure while pricing a claim used to leave REDEEM_PENDING for ever, which
+    # holds the entry slot: the wallet bought nothing more until someone intervened.
+    engine, identity = buy(rig)
+    rig.rpc.winner = bytes.fromhex(UP[2:])
+    inner, down = rig.rpc.call, [True]
+    def flaky(method, params):
+        if method == "eth_estimateGas" and down[0]:
+            raise SetupError("RPC_REQUEST: Arbitrum RPC failed")
+        return inner(method, params)
+    monkeypatch.setattr(rig.rpc, "call", flaky)
+    clock = [END + 300]
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: clock[0])
+    engine.advance(clock[0], rig.broker.settlement)
+    assert rig.ledger.get(identity)["state"] == "REDEEM_PENDING" and rig.rpc.broadcasts == []
+    clock[0] += 30
+    engine.advance(clock[0], rig.broker.settlement)
+    assert rig.ledger.get(identity)["state"] == "REDEEM_PENDING"   # waits a minute first
+    down[0] = False
+    clock[0] += 31
+    engine.advance(clock[0], rig.broker.settlement)
+    engine.advance(clock[0], rig.broker.settlement)
+    assert len(rig.rpc.broadcasts) == 1
+    assert rig.broker.op(rig.ledger.get(identity), "redeem")["raw_tx"] == rig.rpc.broadcasts[0]
+
+
+def test_a_signed_claim_is_never_signed_again_by_the_retry(rig, monkeypatch):
+    engine, identity = buy(rig)
+    rig.rpc.winner = bytes.fromhex(UP[2:])
+    rig.rpc.lose_ack = True
+    clock = [END + 300]
+    monkeypatch.setattr("strategy_lab.execution.live.time.time", lambda: clock[0])
+    engine.advance(clock[0], rig.broker.settlement)
+    for _ in range(3):
+        clock[0] += 120
+        engine.advance(clock[0], rig.broker.settlement)
+    assert len(rig.rpc.broadcasts) == 1
+    assert rig.ledger.get(identity)["state"] == "REDEEM_PENDING"

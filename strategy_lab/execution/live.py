@@ -584,6 +584,11 @@ class LiveBroker:
         if hex_value(returned, 32) != tx_hash:
             raise ValueError("unexpected broadcast hash; reconcile persisted transaction")
 
+    def claim_unsent(self, position):
+        """Whether no claim was ever signed for this position. submit_redeem persists the
+        signed bytes before broadcasting, so no record means nothing reached the chain."""
+        return self.op(position, "redeem") is None
+
     def lookup_redeem(self, position):
         return self._receipt(position, "redeem")
 

@@ -12,6 +12,10 @@ from .signals import decide
 from .errors import QuoteRefused, NotSubmitted, BuyUncertain
 
 
+# How long a claim that never got as far as signing waits before it is tried again.
+CLAIM_RETRY_SECONDS = 60
+
+
 class Executor:
     def __init__(self, settings, ledger, broker):
         if (settings.mode == "paper") != (broker.simulated is True):
@@ -124,6 +128,14 @@ class Executor:
                         self._unknown(identity, "REDEEM_PENDING", now, exc)
                 position = self.ledger.get(identity)
             if position["state"] == "REDEEM_PENDING":
+                # A claim that failed before anything was signed — an RPC hiccup while
+                # pricing it — has nothing to wait for, and waiting held the entry slot
+                # for ever. Nothing was sent, so it is simply ready again, after a pause.
+                unsent = getattr(self.broker, "claim_unsent", None)
+                if unsent is not None and unsent(position):
+                    if now - position["updated_at"] >= CLAIM_RETRY_SECONDS:
+                        self.ledger.transition(identity, "REDEEM_PENDING", "REDEEM_READY", now, error=None)
+                    continue
                 try:
                     receipt = self.broker.lookup_redeem(position)
                 except Exception as exc:
