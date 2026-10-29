@@ -1252,3 +1252,20 @@ def test_a_signed_claim_is_never_signed_again_by_the_retry(rig, monkeypatch):
         engine.advance(clock[0], rig.broker.settlement)
     assert len(rig.rpc.broadcasts) == 1
     assert rig.ledger.get(identity)["state"] == "REDEEM_PENDING"
+
+
+def test_a_short_fill_can_be_accepted_without_halting(rig):
+    rig.profile["halt_on_short_fill"] = False
+    rig.broker = LiveBroker(rig.ledger, rig.profile, "BTC", rig.rpc, rig.account)
+    engine = Executor(rig.settings, rig.ledger, rig.broker)
+    engine.enter(rig.snapshot, NOW)
+    rig.rpc.receipts[BUY_HASH] = receipt(rig.broker.wallet, BUY_HASH, "buy", 1000000)
+    engine.advance(NOW, rig.broker.settlement)
+    p = rig.ledger.positions()[0]
+    assert p["state"] == "OPEN" and p["shares"] == 1000000
+    assert rig.ledger.conn.execute("SELECT 1 FROM live_flags WHERE name='halt'").fetchone() is None
+
+
+def test_halt_on_short_fill_must_be_a_boolean(rig):
+    with pytest.raises(Exception, match="CONFIG_HALT_ON_SHORT_FILL"):
+        LiveBroker(rig.ledger, {**rig.profile, "halt_on_short_fill": "false"}, "BTC", rig.rpc, rig.account)

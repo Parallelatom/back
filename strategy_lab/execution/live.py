@@ -113,6 +113,9 @@ class LiveBroker:
         self.auth = os.environ.get(profile["authorization_env"], "")
         if self.buy_route != "direct" and (not self.auth.strip() or any(c in self.auth for c in "\r\n")):
             raise SetupError("AUTHORIZATION_MISSING: fill the selected Authorization environment variable with the full single-line value")
+        self.halt_on_short_fill = profile.get("halt_on_short_fill", True)
+        if type(self.halt_on_short_fill) is not bool:
+            raise SetupError("CONFIG_HALT_ON_SHORT_FILL: halt_on_short_fill must be true or false without quotes")
         self.max_trades = profile.get("max_trades", 1)
         self.gas_cap = profile.get("claim_gas_cap_wei", 100_000_000_000_000)
         if type(self.max_trades) is not int or not 1 <= self.max_trades <= 10:
@@ -631,7 +634,10 @@ class LiveBroker:
         shares = report["shares_minted_raw" if operation == "buy" else "shares_burned_raw"]
         amount = report["usdc_out_micro" if operation == "buy" else "usdc_in_micro"]
         if operation == "buy" and shares < position["minimum_shares"]:
-            self.stop("actual fill below quoted minimum; acquired shares still reconciled")
+            # The shares are reconciled either way; this only decides whether to stop
+            # buying. The daily loss limit still stops a run of bad fills.
+            if self.halt_on_short_fill:
+                self.stop("actual fill below quoted minimum; acquired shares still reconciled")
         if operation == "redeem" and shares != position["shares"]:
             raise ValueError("claim burned a different position size")
         return Receipt(True, shares, amount, op["tx_hash"])
